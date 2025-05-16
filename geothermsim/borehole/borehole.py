@@ -76,7 +76,7 @@ class Borehole:
         self.n_nodes = basis.n_nodes * n_segments
         self.segment_ratios = segment_ratios
         # Segment edges
-        xi_edges = jnp.concatenate((-jnp.ones(1), 2 * jnp.cumsum(segment_ratios) - 1))
+        xi_edges = 2. * jnp.cumulative_sum(segment_ratios, include_initial=True) - 1.
         self.xi_edges = xi_edges
         # Borehole length
         self.L = jnp.diff(path.f_s(jnp.array([-1., 1.])))[0]
@@ -299,12 +299,5 @@ class Borehole:
             Instance of the `Borehole` class.
 
         """
-        xi = jnp.array([-1., 1.])
-        p = jnp.array(
-            [
-                [x, y, -D],
-                [x + L * jnp.sin(tilt) * jnp.cos(orientation), y + L * jnp.sin(tilt) * jnp.sin(orientation), -D - L * jnp.cos(tilt)],
-            ]
-        )
-        path = Path(xi, p)
+        path = Path.from_dimensions(L, D, x, y, tilt, orientation)
         return cls(r_b, path, basis, n_segments, segment_ratios=segment_ratios)

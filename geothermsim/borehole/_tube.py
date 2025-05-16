@@ -577,12 +577,5 @@ class _Tube(Borehole, ABC):
             Instance of the `Borehole` class.
 
         """
-        xi = jnp.array([-1., 1.])
-        p = jnp.array(
-            [
-                [x, y, -D],
-                [x + L * jnp.sin(tilt) * jnp.cos(orientation), y + L * jnp.sin(tilt) * jnp.sin(orientation), -D - L * jnp.cos(tilt)],
-            ]
-        )
-        path = Path(xi, p)
+        path = Path.from_dimensions(L, D, x, y, tilt, orientation)
         return cls(R_d, r_b, path, basis, n_segments, segment_ratios=segment_ratios, parallel=parallel)
