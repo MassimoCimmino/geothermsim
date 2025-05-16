@@ -352,7 +352,7 @@ class Network(Borefield):
         return a_in, a_b
 
     @classmethod
-    def from_positions(cls, L: ArrayLike, D: ArrayLike, r_b: ArrayLike, x: ArrayLike, y: ArrayLike, R_d: ArrayLike | Callable[[float], Array], basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int | None = None) -> Self:
+    def from_dimensions(cls, L: ArrayLike, D: ArrayLike, r_b: ArrayLike, x: ArrayLike, y: ArrayLike, R_d: ArrayLike | Callable[[float], Array], basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int | None = None) -> Self:
         """Field of straight boreholes from their dimensions.
 
         Parameters
@@ -409,15 +409,8 @@ class Network(Borefield):
         tilt = jnp.broadcast_to(tilt, n_boreholes)
         orientation = jnp.broadcast_to(orientation, n_boreholes)
         boreholes = []
-        xi = jnp.array([-1., 1.])
         for j in range(n_boreholes):
-            p = jnp.array(
-                [
-                    [x[j], y[j], -D[j]],
-                    [x[j] + L[j] * jnp.sin(tilt[j]) * jnp.cos(orientation[j]), y[j] + L[j] * jnp.sin(tilt[j]) * jnp.sin(orientation[j]), -D[j] - L[j] * jnp.cos(tilt[j])],
-                ]
-            )
-            path = Path(xi, p, order=order)
+            path = Path.from_dimensions(L[j], D[j], x[j], y[j], tilt[j], orientation[j])
             boreholes.append(SingleUTube(R_d, r_b[j], path, basis, n_segments, segment_ratios=segment_ratios))
         return cls(boreholes)
 
@@ -460,5 +453,5 @@ class Network(Borefield):
         # Borehole positions and orientation
         x = jnp.tile(jnp.arange(N_1), N_2) * B_1
         y = jnp.repeat(jnp.arange(N_2), N_1) * B_2
-        return cls.from_positions(L, D, r_b, x, y, R_d, basis, n_segments, segment_ratios=segment_ratios)
+        return cls.from_dimensions(L, D, r_b, x, y, R_d, basis, n_segments, segment_ratios=segment_ratios)
         

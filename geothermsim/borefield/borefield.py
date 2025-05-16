@@ -97,17 +97,31 @@ class Borefield:
             of thermal response factors.
         """
         n_boreholes = self.n_boreholes
-        h_to_self = jnp.stack(
-            [
-                jnp.stack(
-                    [
-                        self.boreholes[j].h_to_self(time, alpha) if i == j else self.boreholes[j].h_to_borehole(self.boreholes[i], time, alpha)
-                        for j in jnp.arange(n_boreholes)
-                    ],
-                    axis=-2)
-                for i in jnp.arange(n_boreholes)
-            ],
-            axis=1)
+        h_to_self = jnp.zeros(
+            (
+                len(time),
+                self.n_boreholes,
+                self.n_nodes,
+                self.n_boreholes,
+                self.n_nodes
+            )
+        )
+        for _i, borehole in enumerate(self.boreholes):
+            # Thermal response factors onto nodes on itself
+            h_to_self = h_to_self.at[:, _i, :, _i, :].set(
+                borehole.h_to_self(time, alpha)
+            )
+            # Thermal response factors onto nodes of other boreholes
+            # (up to borehole i - 1)
+            p = self.p[:_i:, :, :].reshape(-1, 3)
+            h_to_self = h_to_self.at[:, :_i, :, _i, :].set(
+                borehole.h_to_point(p, time, alpha).reshape(len(time), -1, self.n_nodes, self.n_nodes)
+            )
+            # (borehole i + 1 and up)
+            p = self.p[_i+1:, :, :].reshape(-1, 3)
+            h_to_self = h_to_self.at[:, _i+1:, :, _i, :].set(
+                borehole.h_to_point(p, time, alpha).reshape(len(time), -1, self.n_nodes, self.n_nodes)
+            )
         return h_to_self
 
     def h_to_point(self, p: Array, time: Array, alpha: float, r_min: float = 0.) -> Array:
@@ -141,7 +155,7 @@ class Borefield:
         return h_to_point
 
     @classmethod
-    def from_positions(cls, L: ArrayLike, D: ArrayLike, r_b: ArrayLike, x: ArrayLike, y: ArrayLike, basis: Basis, n_segments: int, tilt: ArrayLike = 0., orientation: ArrayLike = 0., segment_ratios: ArrayLike | None = None) -> Self:
+    def from_dimensions(cls, L: ArrayLike, D: ArrayLike, r_b: ArrayLike, x: ArrayLike, y: ArrayLike, basis: Basis, n_segments: int, tilt: ArrayLike = 0., orientation: ArrayLike = 0., segment_ratios: ArrayLike | None = None) -> Self:
         """Field of straight boreholes from their dimensions.
 
         Parameters
@@ -194,15 +208,8 @@ class Borefield:
         tilt = jnp.broadcast_to(tilt, n_boreholes)
         orientation = jnp.broadcast_to(orientation, n_boreholes)
         boreholes = []
-        xi = jnp.array([-1., 1.])
         for j in range(n_boreholes):
-            p = jnp.array(
-                [
-                    [x[j], y[j], -D[j]],
-                    [x[j] + L[j] * jnp.sin(tilt[j]) * jnp.cos(orientation[j]), y[j] + L[j] * jnp.sin(tilt[j]) * jnp.sin(orientation[j]), -D[j] - L[j] * jnp.cos(tilt[j])],
-                ]
-            )
-            path = Path(xi, p, order=order)
+            path = Path.from_dimensions(L[j], D[j], x[j], y[j], tilt[j], orientation[j])
             boreholes.append(Borehole(r_b[j], path, basis, n_segments, segment_ratios=segment_ratios))
         return cls(boreholes)
 
@@ -241,5 +248,5 @@ class Borefield:
         # Borehole positions and orientation
         x = jnp.tile(jnp.arange(N_1), N_2) * B_1
         y = jnp.repeat(jnp.arange(N_2), N_1) * B_2
-        return cls.from_positions(L, D, r_b, x, y, basis, n_segments, segment_ratios=segment_ratios)
+        return cls.from_dimensions(L, D, r_b, x, y, basis, n_segments, segment_ratios=segment_ratios)
         

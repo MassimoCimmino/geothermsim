@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
+from collections.abc import Callable
 from functools import partial
+from typing import Self
 
+from interpax import Interpolator1D
 from jax import numpy as jnp
 from jax import Array, jacobian, jit, vmap
 from jax.typing import ArrayLike
 from jax.scipy.special import erfc
-import numpy as np
-from scipy.special import roots_legendre
+from scipy.integrate import fixed_quad
 
 
 class Path:
@@ -14,35 +16,44 @@ class Path:
 
     Parameters
     ----------
-    xi : array_like
+    f_p : callable
+        Function that takes a coordinate or an (N,) array of
+        coordinates ``xi`` and returns an (3,) or (N, 3,) array of
+        positions [x, y, z] along the path.
+    f_dp_dxi : callable
+        Function that takes a coordinate or an (N,) array of
+        coordinates ``xi`` and returns an (3,) or (N, 3,) array of
+        derivatives [dx/dxi, dy/dxi, dz/dxi] along the path.
+    f_J : callable
+        Function that takes a coordinate or an (N,) array of
+        coordinates ``xi`` and returns a float or an (N,) array of
+        norms of the Jacobian sqrt(dx/dxi**2 + dy/dxi**2 + dz/dxi**2)
+        along the path.
+    f_s : callable
+        Function that takes a coordinate or an (N,) array of
+        coordinates ``xi`` and returns a float or an (N,) array of
+        the longitudinal position ``s`` (in meters) along the path.
+    xi : array_like or None, default: None
         (`n_nodes`,) array of node coordinates along the interval
         ``[-1, 1]``.
-    p : array_like
-        Positions (``x``, ``y``, ``z``) of the nodes along the trajectory
-        of the borehole.
-    order : int or None, default: None
-        Order of the polynomial regression through positions `p` to
-        approximate the borehole trajectory. The first row of `p`, which
-        should correspond to the top positition of the borehole (i.e.
-        with ``xi[0]=-1``), is constrained in the polynomial regression.
-        If `order` is ``None``, then ``order=len(xi)``.
-    s_order : int or None, default: None
-        Order of the polynomial approximant of the longitudinal position
-        ``s`` along the borehole trajectory. If `s_order` is ``None``,
-        then ``s_order=2*len(xi)-1``.
+    p : array_like or None, default: None
+        Positions (``x``, ``y``, ``z``) of the nodes along the
+        trajectory of the borehole.
 
     Attributes
     ----------
     n_nodes : int
         Number of nodes.
+    L : float
+        Length of the path (in meters)
 
     """
 
-    def __init__(self, xi: ArrayLike, p: ArrayLike, order: int | None = None, s_order: int | None = None):
+    def __init__(self, f_p: Callable[[float | Array], Array], f_dp_dxi: Callable[[float | Array], Array], f_J: Callable[[float | Array], float | Array], f_s: Callable[[float | Array], float | Array], xi: ArrayLike | None = None, p: ArrayLike | None = None):
         # Runtime type validation
-        if not isinstance(xi, ArrayLike):
+        if not isinstance(xi, ArrayLike) and xi is not None:
             raise TypeError(f"Expected arraylike input; got {xi}")
-        if not isinstance(p, ArrayLike):
+        if not isinstance(p, ArrayLike) and p is not None:
             raise TypeError(f"Expected arraylike input; got {p}")
         # Convert input to jax.Array
         xi = jnp.asarray(xi)
@@ -51,53 +62,95 @@ class Path:
         # --- Class atributes ---
         self.xi = xi
         self.p = p
-        n_nodes = len(xi)
-        self.n_nodes = n_nodes
-        if order is None:
-            order = n_nodes
-        order = jnp.maximum(2, jnp.minimum(order, n_nodes))
-        self.order = order
-        if s_order is None:
-            s_order = 2 * (self.n_nodes - 1)
-        self.s_order = s_order
 
         # --- Path functions ---
         # Position (p)
-        p_w = np.ones(n_nodes)
-        if order < n_nodes:
-            p_w[0] = 1e4
-        p_coefs = jnp.array(np.polyfit(xi, p, order-1, w=p_w))
-        f_p = lambda _eta: jnp.polyval(p_coefs, _eta)
-        self.f_p = jit(
-            lambda _eta: vmap(f_p, in_axes=0)(_eta) if len(jnp.shape(_eta)) > 0 else f_p(_eta)
-        )
+        self._f_p = f_p
         # Derivative of position (dp/dxi)
-        f_dp_dxi = lambda _eta: jacobian(f_p)(_eta)
-        self.f_dp_dxi = jit(
-            lambda _eta: vmap(f_dp_dxi, in_axes=0)(_eta) if len(jnp.shape(_eta)) > 0 else f_dp_dxi(_eta)
-        )
+        self._f_dp_dxi = f_dp_dxi
         # Norm of the Jacobian (J)
-        f_J = lambda _eta: jnp.linalg.norm(f_dp_dxi(_eta))
-        self.f_J = jit(
-            lambda _eta: vmap(f_J, in_axes=0)(_eta) if len(jnp.shape(_eta)) > 0 else f_J(_eta)
-        )
+        self._f_J = f_J
         # Longitudinal position (s)
-        x_s, w_s = roots_legendre(s_order)
-        x_s = jnp.array(x_s)
-        w_s = jnp.array(w_s)
-        low = jnp.concatenate([-jnp.ones(1), x_s[:-1]])
-        high = x_s
-        s = jnp.cumsum(
-            vmap(
-                lambda _a, _b: self.f_J(0.5 * (_a + _b) + 0.5 * x_s * (_b - _a)) @ w_s * 0.5 * (_b - _a),
-                in_axes=(0, 0)
-            )(low, high)
-        )
-        s_coefs = jnp.array(np.polyfit(x_s, s, s_order-1))
-        f_s = lambda _eta: jnp.polyval(s_coefs, _eta)
-        self.f_s = jit(
-            lambda _eta: vmap(f_s, in_axes=0)(_eta) if len(jnp.shape(_eta)) > 0 else f_s(_eta)
-        )
+        self._f_s = f_s
+
+        # --- Additional attributes ---
+        # Number of nodes
+        if xi is not None and p is not None:
+            n_nodes = len(xi)
+            self.n_nodes = n_nodes
+        else:
+            self.n_nodes = None
+        # Length of the path
+        self.L = self.f_s(1.)
+        
+
+    def f_p(self, xi: float | Array) -> Array:
+        """Position along the path.
+
+        Parameters
+        ----------
+        xi : float or array
+            Coordinate of (N,) array of coordinates along the
+            trajectory.
+
+        Returns
+        -------
+        array
+            (3,) or (N, 3,) array of positions
+            (``x``, ``y``, ``z``) along the trajectory.
+        """
+        return self._f_p(xi)
+
+    def f_dp_dxi(self, xi: float | Array) -> Array:
+        """Derivative of the position along the path.
+
+        Parameters
+        ----------
+        xi : float or array
+            Coordinate of (N,) array of coordinates along the
+            trajectory.
+
+        Returns
+        -------
+        array
+            (3,) or (N, 3,) array of derivatives of the position
+            (``dx/dxi``, ``dy/dxi``, ``dz/xi``) along the trajectory.
+        """
+        return self._f_dp_dxi(xi)
+
+    def f_J(self, xi: float | Array) -> float | Array:
+        """Norm of the Jacobian along the path.
+
+        Parameters
+        ----------
+        xi : float or array
+            Coordinate of (N,) array of coordinates along the
+            trajectory.
+
+        Returns
+        -------
+        float or array
+            Norm of the Jacobian or (N, 3,) array of the norms of the
+            Jacobian along the trajectory.
+        """
+        return self._f_J(xi)
+
+    def f_s(self, xi: float | Array) -> float | Array:
+        """Longitudinal position along the path.
+
+        Parameters
+        ----------
+        xi : float or array
+            Coordinate of (N,) array of coordinates along the
+            trajectory.
+
+        Returns
+        -------
+        float or array
+            Longitudinal position or (N,) array of longitudinal
+            positions along the trajectory.
+        """
+        return self._f_s(xi)
 
     @partial(jit, static_argnames=['self'])
     def point_heat_source(self, xi: Array | float, p: Array, time: Array | float, alpha: float, r_min: float = 0.) -> Array | float:
@@ -146,9 +199,224 @@ class Path:
         # Current position of the point source
         p_source = self.f_p(xi)
         # Distance to the real point (p)
-        r = jnp.sqrt(jnp.linalg.norm(p_source - p)**2 + r_min**2)
+        r = jnp.sqrt(((p_source - p)**2).sum() + r_min**2)
         # Distance to the mirror point (p')
         r_mirror = jnp.linalg.norm(p_source - p * jnp.array([1, 1, -1]))
         # Point heat source solution
         h = 0.5 * erfc(r / jnp.sqrt(4 * alpha * time)) / r - 0.5 * erfc(r_mirror / jnp.sqrt(4 * alpha * time)) / r_mirror
         return h * self.f_J(xi)
+
+    @classmethod
+    def from_dimensions(cls, L: float, D: float, x: float, y: float, tilt: float, orientation: float) -> Self:
+        """Path from the dimensions of a borehole.
+
+        Parameters
+        ----------
+        L : float
+            Borehole length (in meters).
+        D : float
+            Borehole buried depth (in meters).
+        r_b : float
+            Borehole radius (in meters).
+        x, y : array_like
+            Horizontal position (in meters) of the top end of the
+            borehole.
+        tilt : float
+            Tilt angle (in radians) of the borehole with respect to
+            vertical.
+        orientation : float
+            Orientation (in radians) of the inclined borehole. An
+            inclination toward the x-axis corresponds to an orientation
+            of zero.
+
+        Returns
+        -------
+        path
+            Instance of the `Path` class.
+
+        """
+        # Position of the top of the borehole
+        p0 = jnp.array([x, y, -D])
+        # Position of the bottom of the borehole
+        delta_p = jnp.array(
+            [
+                L * jnp.sin(tilt) * jnp.cos(orientation),
+                L * jnp.sin(tilt) * jnp.sin(orientation),
+                -L * jnp.cos(tilt)
+            ]
+        )
+        p1 = p0 + delta_p
+
+        # --- Class atributes ---
+        xi = jnp.array([-1., 1.])
+        p = jnp.stack([p0, p1], axis=0)
+
+        # --- Path functions ---
+        p_mean = p.mean(axis=0)
+        L = jnp.linalg.norm(delta_p)
+        def f_p(_xi: float | Array) -> Array:
+            """Position along the path."""
+            if len(jnp.shape(_xi)) > 0:
+                return vmap(f_p, in_axes=0)(_xi)
+            return p_mean + 0.5 * _xi * delta_p
+        def f_dp_dxi(_xi: float | Array) -> Array:
+            """Derivative of the position along the path."""
+            if len(jnp.shape(_xi)) > 0:
+                return jnp.broadcast_to(0.5 * delta_p, (len(_xi), 3))
+            return 0.5 * delta_p
+        def f_J(_xi: float | Array) -> float | Array:
+            """Norm of the Jacobian along the path."""
+            if len(jnp.shape(_xi)) > 0:
+                return jnp.broadcast_to(0.5 * L, len(_xi))
+            return 0.5 * L
+        def f_s(_xi: float | Array) -> float | Array:
+            """Longitudinal position along the path."""
+            return 0.5 * (1 + _xi) * L
+        return cls(f_p, f_dp_dxi, f_J, f_s, xi=xi, p=p)
+
+    @classmethod
+    def from_points(cls, xi: ArrayLike, p: ArrayLike, method: str = 'cubic2', s_method: str = 'monotonic', s_order: int = 21, s_num: int = 21) -> Self:
+        """Path from positions along the path.
+
+        Parameters
+        ----------
+        xi : array_like
+            (N,) array of coordinates along the path. Should be of
+            sufficient length for the selected interpolation methods.
+        p : array_like
+            (N, 3,) array of positions (in meters) along the path.
+        method, s_method : str, default: 'cubic2', 'monotonic'
+            Interpolation methods to be used by
+            ``interpax.Interpolator1D`` for the position along the
+            path and for the longitudinal position ``s`` along the
+            path.
+        s_order : int, default: 21
+            Number of points for the integration of the Jacobian between
+            each subsequent coordinates to obtain the ongitudinal
+            position ``s`` from the norm of the Jacobian along the path.
+        s_num : int, default: 21
+            Number of evenly distributed knots along the path to
+            evaluate the longitudinal position ``s`` using trapezoidal
+            integration and generate the interpolator.
+            
+
+        Returns
+        -------
+        path
+            Instance of the `Path` class.
+
+        """
+        # Runtime type validation
+        if not isinstance(xi, ArrayLike):
+            raise TypeError(f"Expected arraylike input; got {xi}")
+        if not isinstance(p, ArrayLike):
+            raise TypeError(f"Expected arraylike input; got {p}")
+        # Convert input to jax.Array
+        xi = jnp.asarray(xi)
+        p = jnp.atleast_2d(p)
+
+        # --- Path functions ---
+        # Position along the path
+        f_p = Interpolator1D(xi, p, method=method, extrap=True)
+        # Derivative of the position along the path
+        f_dp_dxi = partial(f_p, dx=1)
+        # Norm of the Jacobian along the path
+        def f_J(_xi: float | Array) -> float | Array:
+            """Norm of the Jacobian along the path."""
+            return jnp.linalg.norm(f_dp_dxi(_xi), axis=-1)
+        # Longitudinal position along the path
+        s_xi = jnp.linspace(-1., 1., num=s_num)
+        a, b = s_xi[:-1], s_xi[1:]
+        ds = jnp.array(
+            [
+                fixed_quad(f_J, _a, _b, n=s_order)[0]
+                for _a, _b in zip(a, b)
+            ]
+        )
+        s = jnp.cumulative_sum(ds, include_initial=True)
+        f_s = Interpolator1D(s_xi, s, method=s_method, extrap=True)
+        return cls(f_p, f_dp_dxi, f_J, f_s, xi=xi, p=p)
+
+    @classmethod
+    def Polynomial(cls, xi: ArrayLike, p: ArrayLike, deg: int = None, s_method: str = 'monotonic', s_order: int = 21, s_num: int = 21) -> Self:
+        """Polynomial path from positions along the path.
+
+        Parameters
+        ----------
+        xi : array_like
+            (N,) array of coordinates along the path. Should be of
+            sufficient length for the selected interpolation methods.
+        p : array_like
+            (N, 3,) array of positions (in meters) along the path.
+        deg : int or None, default: None
+            Degree of the polynomial representing the path. If None,
+            ``deg = N - 1``. If ``deg < N - 1``, the polynomial is
+            obtained by regression, taking the first position as fixed
+            (usually ``xi[0] = -1.`` and its corresponding position
+            ``p[0]``).
+        s_method : str, default: 'monotonic'
+            Interpolation methods to be used by
+            ``interpax.Interpolator1D`` for the position along the
+            path and for the longitudinal position ``s`` along the
+            path.
+        s_order : int, default: 21
+            Number of points for the integration of the Jacobian between
+            each subsequent coordinates to obtain the ongitudinal
+            position ``s`` from the norm of the Jacobian along the path.
+        s_num : int, default: 21
+            Number of evenly distributed knots along the path to
+            evaluate the longitudinal position ``s`` using trapezoidal
+            integration and generate the interpolator.
+            
+
+        Returns
+        -------
+        path
+            Instance of the `Path` class.
+
+        """
+        # Runtime type validation
+        if not isinstance(xi, ArrayLike):
+            raise TypeError(f"Expected arraylike input; got {xi}")
+        if not isinstance(p, ArrayLike):
+            raise TypeError(f"Expected arraylike input; got {p}")
+        # Convert input to jax.Array
+        xi = jnp.asarray(xi)
+        p = jnp.atleast_2d(p)
+
+        # --- Path functions ---
+        # Position along the path
+        if deg is None:
+            p_coefs = jnp.polyfit(xi, p, len(xi)-1)
+        else:
+            p_w = jnp.ones_like(xi)
+            p_w.at[0].set(1e4)
+            p_coefs = jnp.polyfit(xi, p, deg, w=p_w)
+        def f_p(_xi: float | Array) -> Array:
+            """Position along the path."""
+            if len(jnp.shape(_xi)) > 0:
+                return vmap(f_p, in_axes=0)(_xi)
+            return jnp.polyval(p_coefs, _xi)
+        # Derivative of the position along the path
+        _f_dp_dxi = jacobian(f_p)
+        def f_dp_dxi(_xi: float | Array) -> Array:
+            """Derivative of the position along the path."""
+            if len(jnp.shape(_xi)) > 0:
+                return vmap(f_dp_dxi, in_axes=0)(_xi)
+            return _f_dp_dxi(_xi)
+        # Norm of the Jacobian along the path
+        def f_J(_xi: float | Array) -> float | Array:
+            """Norm of the Jacobian along the path."""
+            return jnp.linalg.norm(f_dp_dxi(_xi), axis=-1)
+        # Longitudinal position along the path
+        s_xi = jnp.linspace(-1., 1., num=s_num)
+        a, b = s_xi[:-1], s_xi[1:]
+        ds = jnp.array(
+            [
+                fixed_quad(f_J, _a, _b, n=s_order)[0]
+                for _a, _b in zip(a, b)
+            ]
+        )
+        s = jnp.cumulative_sum(ds, include_initial=True)
+        f_s = Interpolator1D(s_xi, s, method=s_method, extrap=True)
+        return cls(f_p, f_dp_dxi, f_J, f_s, xi=xi, p=p)

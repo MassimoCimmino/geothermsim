@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-from collections.abc import Callable 
+from collections.abc import Callable
 from typing import Self, Tuple
 
 from jax import numpy as jnp
 from jax import Array, jit, vmap
 from jax.typing import ArrayLike
-import numpy as np
 from scipy.special import roots_legendre
 
 
@@ -50,7 +49,11 @@ class Basis:
         # --- Basis functions (psi) ---
         power = jnp.arange(self.n_nodes)
         coefs = jnp.linalg.inv(
-            np.power.outer(self.xi, power)
+            vmap(
+                jnp.power,
+                in_axes=(None, 0),
+                out_axes=1
+            )(self.xi, power)
         )
         f_psi = lambda _eta: _eta**power @ coefs
         self.f_psi = jit(
