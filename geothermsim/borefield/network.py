@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 from collections.abc import Callable
 from functools import partial
-from typing import List, Self, Tuple
+from typing import List, Tuple
+from typing_extensions import Self
 
 from jax import numpy as jnp
 from jax import Array, jit, vmap

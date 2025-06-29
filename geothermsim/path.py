@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 from collections.abc import Callable
 from functools import partial
-from typing import Self
+from typing_extensions import Self
 
 from interpax import Interpolator1D
 from jax import numpy as jnp

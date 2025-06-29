@@ -202,7 +202,7 @@ class CoaxialHeatExchanger(_GroundHeatExchanger):
         R_d_grout = self.multipole.thermal_resistances(R_fp)
         # Full delta-circuit of thermal resistances
         R_d = jnp.full((self.n_pipes, self.n_pipes), jnp.inf)
-        R_d = R_d.at[*self._indices_outer_mesh].set(R_d_grout)
+        R_d = R_d.at[self._indices_outer_mesh].set(R_d_grout)
         R_d = R_d.at[self.indices_outer, self.indices_inner].set(R_ff)
         R_d = R_d.at[self.indices_inner, self.indices_outer].set(R_ff)
         return R_d
