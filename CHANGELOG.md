@@ -1,5 +1,13 @@
 # History of changes
 
+
+## Version 0.3.0 [in development]
+
+### New features
+
+* [Issue 19](https://github.com/MassimoCimmino/geothermsim/issues/19) - Created the `Fluid` class. The class includes a method to evaluate fluid properties from the `SecondaryCoolantProps` package.
+
+
 ## Version 0.2.0 (2025-06-29)
 
 ### New features
