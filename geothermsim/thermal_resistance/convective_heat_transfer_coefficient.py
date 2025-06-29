@@ -12,7 +12,7 @@ reynolds_number_circular_pipe
 )
 
 
-def convective_heat_transfer_coefficient_annular_pipe(m_flow: float, r_p_in: float, r_p_out: float, mu_f: float, rho_f: float, k_f: float, cp_f: float, epsilon: float) -> Array:
+def convective_heat_transfer_coefficient_annular_pipe(m_flow: float, r_p_in: float, r_p_out: float, mu_f: float, rho_f: float, k_f: float, Pr: float, epsilon: float) -> Array:
     """Convective heat transfer coefficient in circular pipe.
 
     Parameters
@@ -29,8 +29,8 @@ def convective_heat_transfer_coefficient_annular_pipe(m_flow: float, r_p_in: flo
         Fluid density (in kg/m3).
     k_f : float
         Fluid thermal conductivity (in W/m-K).
-    cp_f : float
-        Fluid isobaric specific heat capacity (in J/kg-K).
+    Pr : float
+        Prandtl number.
     epsilon : float
         Pipe surface roughness (in meters).
 
@@ -43,8 +43,6 @@ def convective_heat_transfer_coefficient_annular_pipe(m_flow: float, r_p_in: flo
     """
     # Reynolds number
     Re = reynolds_number_annular_pipe(m_flow, r_p_in, r_p_out, mu_f, rho_f)
-    # Prandtl number
-    Pr = cp_f * mu_f / k_f
     # Darcy friction factor
     D = 2 * (r_p_out - r_p_in)
     E = epsilon / D
@@ -57,7 +55,7 @@ def convective_heat_transfer_coefficient_annular_pipe(m_flow: float, r_p_in: flo
     return h_fluid
 
 
-def convective_heat_transfer_coefficient_circular_pipe(m_flow: float, r_p: float, mu_f: float, rho_f: float, k_f: float, cp_f: float, epsilon: float) -> float:
+def convective_heat_transfer_coefficient_circular_pipe(m_flow: float, r_p: float, mu_f: float, rho_f: float, k_f: float, Pr: float, epsilon: float) -> float:
     """Convective heat transfer coefficient in circular pipe.
 
     Parameters
@@ -72,8 +70,8 @@ def convective_heat_transfer_coefficient_circular_pipe(m_flow: float, r_p: float
         Fluid density (in kg/m3).
     k_f : float
         Fluid thermal conductivity (in W/m-K).
-    cp_f : float
-        Fluid isobaric specific heat capacity (in J/kg-K).
+    Pr : float
+        Prandtl number.
     epsilon : float
         Pipe surface roughness (in meters).
 
@@ -85,8 +83,6 @@ def convective_heat_transfer_coefficient_circular_pipe(m_flow: float, r_p: float
     """
     # Reynolds number
     Re = reynolds_number_circular_pipe(m_flow, r_p, mu_f, rho_f)
-    # Prandtl number
-    Pr = cp_f * mu_f / k_f
     # Darcy friction factor
     D = 2 * r_p
     E = epsilon / D

@@ -31,8 +31,6 @@ class Simulation:
         that takes the time (in seconds) and a 1d array of positions ``z``
         (in meters, negative) as inputs and returns a 1d array of
         undisturbed ground temperatures (in degree Celsius).
-    cp_f : float
-        Fluid specific isobaric heat capacity (in J/kg-K).
     alpha : float
         Ground thermal diffusivity (in m^2/s)
     k_s : float
@@ -70,7 +68,7 @@ class Simulation:
 
     """
 
-    def __init__(self, borefield: Network, cp_f: float, dt: float, tmax: float, T0: float | Callable[[float, Array], Array | float], alpha: float, k_s: float, cells_per_level: int = 5, p: ArrayLike | None = None, store_node_values: bool = False):
+    def __init__(self, borefield: Network, dt: float, tmax: float, T0: float | Callable[[float, Array], Array | float], alpha: float, k_s: float, cells_per_level: int = 5, p: ArrayLike | None = None, store_node_values: bool = False):
         # Runtime type validation
         if not isinstance(p, ArrayLike) and p is not None:
             raise TypeError(f"Expected arraylike or None input; got {p}")
@@ -81,7 +79,6 @@ class Simulation:
         # --- Class atributes ---
         # Parameters
         self.borefield = borefield
-        self.cp_f = cp_f
         self.dt = dt
         self.tmax = tmax
         self.n_nodes = self.borefield.n_boreholes * self.borefield.n_nodes
@@ -150,7 +147,7 @@ class Simulation:
         N = self.n_nodes
         # Borehole heat transfer rate coefficients for current fluid mass
         # flow rate `m_flow`
-        self.g_in, self.g_b = self.borefield.g_to_self(m_flow, self.cp_f)
+        self.g_in, self.g_b = self.borefield.g_to_self(m_flow)
         # Update system of equation for the current borehole wall
         # temperature `T0` at nodes
         A = self.A.at[:N, :N].set(-(jnp.eye(N) + jnp.einsum('iml,iljn->imjn', self.g_b, self.h_to_self).reshape((N, N))))
@@ -370,6 +367,7 @@ class Simulation:
             The outlet fluid temperature (in degree Celsius).
 
         """
+        cp_f = self.borefield.fluid.specific_heat()
         m_flow = jnp.maximum(m_flow, m_flow_small)
         # Build and solve system of equations
         A, B = self.update_system_of_equations(
@@ -381,7 +379,7 @@ class Simulation:
         q = X[:self.n_nodes].reshape((self.borefield.n_boreholes, -1))
         T_b = T0 - jnp.tensordot(self.h_to_self, q, axes=([-2, -1], [-2, -1]))
         T_f_in = X[-1]
-        T_f_out = T_f_in + Q / (jnp.sum(m_flow) * self.cp_f)
+        T_f_out = T_f_in + Q / (jnp.sum(m_flow) * cp_f)
         return Q, q, T_b, T_f_in, T_f_out
 
     @partial(jit, static_argnames=['self'])

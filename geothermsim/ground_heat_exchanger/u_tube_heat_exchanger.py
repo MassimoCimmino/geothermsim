@@ -6,6 +6,7 @@ from jax import Array, jit, vmap
 from jax.typing import ArrayLike
 
 from ._ground_heat_exchanger import _GroundHeatExchanger
+from ..fluid import Fluid
 from ..thermal_resistance import (
 conduction_thermal_resistance_circular_pipe,
 convective_heat_transfer_coefficient_circular_pipe,
@@ -27,20 +28,14 @@ class UTubeHeatExchanger(_GroundHeatExchanger):
         Outer radius of the pipes (in meters).
     r_b : float
         Borehole radius (in meters).
+    fluid : fluid
+        The fluid.
     k_s : float
         Ground thermal conductivity (in W/m-K).
     k_b : float
         Grout thermal conductivity (in W/m-K).
     k_p : array_like
         Thermal conductivity of the pipes (in W/m-K).
-    mu_f : float
-        Fluid dynamic viscosity (in kg/m-s).
-    rho_f : float
-        Fluid density (in kg/m3).
-    k_f : float
-        Fluid thermal conductivity (in W/m-K).
-    cp_f : float
-        Fluid isobaric specific heat capacity (in J/kg-K).
     epsilon : float
         Pipe surface roughness (in meters).
     parallel : bool, default: True
@@ -57,7 +52,7 @@ class UTubeHeatExchanger(_GroundHeatExchanger):
 
     """
 
-    def __init__(self, p: ArrayLike, r_p_in: ArrayLike, r_p_out: ArrayLike, r_b: float, k_s: float, k_b: float, k_p: ArrayLike, mu_f: float, rho_f: float, k_f: float, cp_f: float, epsilon: float, parallel: bool = True, J: int = 3):
+    def __init__(self, p: ArrayLike, r_p_in: ArrayLike, r_p_out: ArrayLike, r_b: float, fluid: Fluid, k_s: float, k_b: float, k_p: ArrayLike, epsilon: float, parallel: bool = True, J: int = 3):
         # Runtime type validation
         if not isinstance(r_p_in, ArrayLike):
             raise TypeError(f"Expected arraylike input; got {r_p_in}")
@@ -79,13 +74,10 @@ class UTubeHeatExchanger(_GroundHeatExchanger):
         self.r_p_in = r_p_in
         self.r_p_out = r_p_out
         self.r_b = r_b
+        self.fluid = fluid
         self.k_s = k_s
         self.k_b = k_b
         self.k_p = k_p
-        self.mu_f = mu_f
-        self.rho_f = rho_f
-        self.k_f = k_f
-        self.cp_f = cp_f
         self.epsilon = epsilon
         self.parallel = parallel
         self.J = J
@@ -123,12 +115,19 @@ class UTubeHeatExchanger(_GroundHeatExchanger):
 
         """
         m_flow_pipe = self._m_flow_factor * m_flow
+        # Fluid physical properties
+        rho_f = self.fluid.density()
+        mu_f = self.fluid.viscosity()
+        k_f = self.fluid.conductivity()
+        Pr = self.fluid.prandtl()
+        # Convection thermal resistance in circular pipes
         h_fluid = vmap(
             convective_heat_transfer_coefficient_circular_pipe,
             in_axes=(None, 0, None, None, None, None, None),
             out_axes=0
-        )(m_flow_pipe, self.r_p_in, self.mu_f, self.rho_f, self.k_f, self.cp_f, self.epsilon)
+        )(m_flow_pipe, self.r_p_in, mu_f, rho_f, k_f, Pr, self.epsilon)
         R_f = 1 / (2 * jnp.pi * self.r_p_in * h_fluid)
+        # Delta-circuit thermal resistances through grout
         R_fp = R_f + self.R_p
         R_d = self.multipole.thermal_resistances(R_fp)
         return R_d
