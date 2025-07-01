@@ -25,8 +25,6 @@ class gFunction:
         fluid mass flow rate per borehole.
     time : array_like
         Times (in seconds) to evaluate the g-function.
-    cp_f : float
-        Fluid specific isobaric heat capacity (in J/kg-K).
     alpha : float
         Ground thermal diffusivity (in m^2/s)
     k_s : float
@@ -55,7 +53,7 @@ class gFunction:
 
     """
 
-    def __init__(self, borefield: Network, m_flow: float | Array, cp_f: float, time: ArrayLike, alpha: float, k_s: float, p: ArrayLike | None = None, disp: bool = True):
+    def __init__(self, borefield: Network, m_flow: float | Array, time: ArrayLike, alpha: float, k_s: float, p: ArrayLike | None = None, disp: bool = True):
         # Runtime type validation
         if not isinstance(time, ArrayLike):
             raise TypeError(f"Expected arraylike input; got {time}")
@@ -71,7 +69,6 @@ class gFunction:
         self.borefield = borefield
         self.n_nodes = self.borefield.n_boreholes * self.borefield.n_nodes
         self.m_flow = m_flow
-        self.cp_f = cp_f
         self.time = time
         self.time = jnp.concatenate((jnp.array([0.]), self.time))
         self.alpha = alpha
@@ -113,7 +110,7 @@ class gFunction:
             ),
             axis=0)
         # Borehole heat transfer rate coefficients
-        self.g_in, self.g_b = self.borefield.g_to_self(self.m_flow, self.cp_f)
+        self.g_in, self.g_b = self.borefield.g_to_self(self.m_flow)
         # Initialize system of equations
         self.A = jnp.block(
             [[jnp.eye(N), self.g_in.reshape((-1, 1))],
@@ -225,11 +222,12 @@ class gFunction:
             0, self.n_times, simulate_step, val, unroll=False)
 
         # Outlet fluid temperature
-        T_f_out = self.T_f_in - 2 * jnp.pi * self.k_s * self.borefield.L.sum() / (self.m_flow_network * self.cp_f)
+        cp_f = self.borefield.fluid.specific_heat()
+        T_f_out = self.T_f_in - 2 * jnp.pi * self.k_s * self.borefield.L.sum() / (self.m_flow_network * cp_f)
         # Average fluid temperature
         T_f = 0.5 * (self.T_f_in + T_f_out)
         # Borefield thermal resistance
-        R_field = self.borefield.effective_borefield_thermal_resistance(self.m_flow, self.cp_f)
+        R_field = self.borefield.effective_borefield_thermal_resistance(self.m_flow)
         # Effective borehole wall temperature
         self.g = T_f - 2 * jnp.pi * self.k_s * R_field
         if disp:

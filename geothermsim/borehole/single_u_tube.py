@@ -20,6 +20,8 @@ class SingleUTube(_Tube):
         (2, 2,) array of thermal resistances (in m-K/W), or callable that
         takes the mass flow rate as input (in kg/s) and returns a (2, 2,)
         array.
+    fluid : fluid
+        The fluid.
     r_b : float
         Borehole radius (in meters).
     path : path

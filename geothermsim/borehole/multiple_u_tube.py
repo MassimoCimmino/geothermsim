@@ -21,6 +21,8 @@ class MultipleUTube(_Tube):
         (`n_pipes`, `n_pipes`,) array of thermal resistances (in m-K/W),
         or callable that takes the mass flow rate as input (in kg/s) and
         returns a (`n_pipes`, `n_pipes`,) array.
+    fluid : fluid
+        The fluid.
     r_b : float
         Borehole radius (in meters).
     path : path

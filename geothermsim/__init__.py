@@ -1,4 +1,5 @@
 from .basis import Basis
+from .fluid import Fluid
 from .path import Path
 from .borehole import Borehole, SingleUTube, MultipleUTube
 from .borefield import Borefield, Network

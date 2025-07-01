@@ -10,6 +10,7 @@ from jax.typing import ArrayLike
 
 from ..basis import Basis
 from .borehole import Borehole
+from ..fluid import Fluid
 from ..path import Path
 
 
@@ -22,6 +23,8 @@ class _Tube(Borehole, ABC):
         (`n_pipes`, `n_pipes`,) array of thermal resistances (in m-K/W),
         or callable that takes the mass flow rate as input (in kg/s) and
         returns a (`n_pipes`, `n_pipes`,) array.
+    fluid : fluid
+        The fluid.
     r_b : float
         Borehole radius (in meters).
     path : path
@@ -78,7 +81,7 @@ class _Tube(Borehole, ABC):
 
     """
 
-    def __init__(self, R_d: ArrayLike | Callable[[float], Array], r_b: float, path: Path, basis: Basis, n_segments: int, segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True):
+    def __init__(self, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, r_b: float, path: Path, basis: Basis, n_segments: int, segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True):
         # Runtime type validation
         if not isinstance(R_d, ArrayLike) and not callable(R_d):
             raise TypeError(f"Expected arraylike or callable input; got {R_d}")
@@ -95,6 +98,7 @@ class _Tube(Borehole, ABC):
         super().__init__(r_b, path, basis, n_segments, segment_ratios=segment_ratios)
         # Other attributes
         self.R_d = R_d
+        self.fluid = fluid
         self.parallel = parallel
         shape = jnp.shape(self.thermal_resistances(1.))
         self.n_pipes = shape[0]
@@ -136,15 +140,13 @@ class _Tube(Borehole, ABC):
             ])
         self._top_connectivity = (_top_connectivity_in, _top_connectivity_u)
 
-    def effective_borehole_thermal_resistance(self, m_flow: float, cp_f: float) -> float:
+    def effective_borehole_thermal_resistance(self, m_flow: float) -> float:
         """Effective borehole thermal resistance.
 
         Parameters
         ----------
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        cp_f : float
-            Fluid specific isobaric heat capacity (in J/kg-K).
 
         Returns
         -------
@@ -152,6 +154,7 @@ class _Tube(Borehole, ABC):
             Effective borehole thermal resistance (in m-K/W).
 
         """
+        cp_f = self.fluid.specific_heat()
         m_flow_pipe = self.m_flow_pipe(m_flow)
         beta_ij = self._beta_ij(m_flow, cp_f)
         a = self._outlet_fluid_temperature_a_in(
@@ -162,7 +165,7 @@ class _Tube(Borehole, ABC):
         R_b = 0.5 * self.L / (m_flow * cp_f) * (1. + a) / (1. - a)
         return R_b
 
-    def g(self, xi: Array | float, m_flow: float, cp_f: float) -> Tuple[Array | float, Array]:
+    def g(self, xi: Array | float, m_flow: float) -> Tuple[Array | float, Array]:
         """Coefficients to evaluate the heat extraction rate.
 
         Parameters
@@ -171,8 +174,6 @@ class _Tube(Borehole, ABC):
             (M,) array of coordinates along the borehole.
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        cp_f : float
-            Fluid specific isobaric heat capacity (in J/kg-K).
 
         Returns
         -------
@@ -183,18 +184,17 @@ class _Tube(Borehole, ABC):
             temperature.
 
         """
+        cp_f = self.fluid.specific_heat()
         a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f)
         return a_in, a_b
 
-    def g_to_self(self, m_flow: float, cp_f: float) -> Tuple[Array, Array]:
+    def g_to_self(self, m_flow: float) -> Tuple[Array, Array]:
         """Coefficients to evaluate the heat extraction rate at nodes.
 
         Parameters
         ----------
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        cp_f : float
-            Fluid specific isobaric heat capacity (in J/kg-K).
 
         Returns
         -------
@@ -206,10 +206,11 @@ class _Tube(Borehole, ABC):
             wall temperature.
 
         """
+        cp_f = self.fluid.specific_heat()
         a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f)
         return a_in, a_b
 
-    def fluid_temperature(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float, cp_f: float) -> Array:
+    def fluid_temperature(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float) -> Array:
         """Fluid temperatures.
 
         Parameters
@@ -223,8 +224,6 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        cp_f : float
-            Fluid specific isobaric heat capacity (in J/kg-K).
 
         Returns
         -------
@@ -232,12 +231,13 @@ class _Tube(Borehole, ABC):
             (M, 2,) array of fluid temperatures (in degree Celsius).
 
         """
+        cp_f = self.fluid.specific_heat()
         beta_ij = self._beta_ij(m_flow, cp_f)
         a_in, a_b = self._fluid_temperature(xi, m_flow, cp_f)
         T_f = a_in * T_f_in + a_b @ T_b
         return T_f
 
-    def heat_extraction_rate(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float, cp_f: float) -> Array | float:
+    def heat_extraction_rate(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float) -> Array | float:
         """Heat extraction rate.
 
         Parameters
@@ -251,8 +251,6 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        cp_f : float
-            Fluid specific isobaric heat capacity (in J/kg-K).
 
         Returns
         -------
@@ -261,11 +259,12 @@ class _Tube(Borehole, ABC):
             ``float``, then ``M=0``.
 
         """
+        cp_f = self.fluid.specific_heat()
         a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
 
-    def heat_extraction_rate_to_self(self, T_f_in: float, T_b: Array, m_flow: float, cp_f: float) -> Array:
+    def heat_extraction_rate_to_self(self, T_f_in: float, T_b: Array, m_flow: float) -> Array:
         """Heat extraction rate at nodes.
 
         Parameters
@@ -277,8 +276,6 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        cp_f : float
-            Fluid specific isobaric heat capacity (in J/kg-K).
 
         Returns
         -------
@@ -287,6 +284,7 @@ class _Tube(Borehole, ABC):
             is a ``float``, then ``M=0``.
 
         """
+        cp_f = self.fluid.specific_heat()
         a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
@@ -307,7 +305,7 @@ class _Tube(Borehole, ABC):
         """
         return self._m_flow_factor * m_flow
 
-    def outlet_fluid_temperature(self, T_f_in: float, T_b: Array, m_flow: float, cp_f: float) -> float:
+    def outlet_fluid_temperature(self, T_f_in: float, T_b: Array, m_flow: float) -> float:
         """Outlet fluid temperature.
 
         Parameters
@@ -319,8 +317,6 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        cp_f : float
-            Fluid specific isobaric heat capacity (in J/kg-K).
 
         Returns
         -------
@@ -328,6 +324,7 @@ class _Tube(Borehole, ABC):
             Outlet fluid temperature (in degree Celsius).
 
         """
+        cp_f = self.fluid.specific_heat()
         a_in, a_b = self._outlet_fluid_temperature(m_flow, cp_f)
         T_f_out = a_in * T_f_in + a_b @ T_b
         return T_f_out
@@ -883,7 +880,7 @@ class _Tube(Borehole, ABC):
         ...
 
     @classmethod
-    def from_dimensions(cls, R_d: ArrayLike | Callable[[float], Array], L: float, D: float, r_b: float, x: float, y: float, basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True) -> Self:
+    def from_dimensions(cls, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, L: float, D: float, r_b: float, x: float, y: float, basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True) -> Self:
         """Straight borehole from its dimensions.
 
         Parameters
@@ -892,6 +889,8 @@ class _Tube(Borehole, ABC):
             (`n_pipes`, `n_pipes`,) array of thermal resistances
             (in m-K/W), or callable that takes the mass flow rate as input
             (in kg/s) and returns a (`n_pipes`, `n_pipes`,) array.
+        fluid : fluid
+            The fluid.
         L : float
             Borehole length (in meters).
         D : float
@@ -936,4 +935,4 @@ class _Tube(Borehole, ABC):
 
         """
         path = Path.Line(L, D, x, y, tilt, orientation)
-        return cls(R_d, r_b, path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, parallel=parallel)
+        return cls(R_d, fluid, r_b, path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, parallel=parallel)
