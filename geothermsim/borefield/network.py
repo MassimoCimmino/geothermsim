@@ -86,7 +86,7 @@ class Network(Borefield):
             Effective borefield thermal resistance (in m-K/W).
 
         """
-        cp_f = self.fluid_specific_heat(T_f)
+        cp_f = self._fluid_specific_heat(T_f)
         m_flow_borehole = self.m_flow_borehole(m_flow)
         m_flow_network = jnp.sum(m_flow)
         a = jnp.average(
@@ -96,29 +96,6 @@ class Network(Borefield):
         # Effective borehole thermal resistance
         R_field = 0.5 * self.L.sum() / (m_flow_network * cp_f) * (1. + a) / (1. - a)
         return R_field
-
-    def fluid_specific_heat(self, T_f: float | Array | None) -> float:
-        """Fluid specific isobaric heat capacity.
-
-        Parameters
-        ----------
-        T_f : float, array or None, default: None
-            Fluid temperature or array of fluid temperatures
-            (in degree Celsius). If ``None`` or if `fluid_heat_capacity_mode`
-            is set to 'nominal', the nominal fluid temperature is used.
-
-        Returns
-        -------
-        float
-            The specific heat capacity at the mean temperature (in J/kg-K).
-
-        """
-        if T_f is None or self.fluid_heat_capacity_mode == 'nominal':
-            cp_f = self.fluid.specific_heat()
-        else:
-            T_f = jnp.mean(T_f)
-            cp_f = self.fluid.specific_heat(T_f)
-        return cp_f
 
     def g(self, xi: Array | float, m_flow: float | Array, T_f: float | Array | None = None) -> Array:
         """Coefficients to evaluate the heat extraction rate.
@@ -407,6 +384,29 @@ class Network(Borefield):
                 axis=0
             ) @ m_flow_borehole / m_flow_network
         return T_f_out
+
+    def _fluid_specific_heat(self, T_f: float | Array | None) -> float:
+        """Fluid specific isobaric heat capacity.
+
+        Parameters
+        ----------
+        T_f : float, array or None, default: None
+            Fluid temperature or array of fluid temperatures
+            (in degree Celsius). If ``None`` or if `fluid_heat_capacity_mode`
+            is set to 'nominal', the nominal fluid temperature is used.
+
+        Returns
+        -------
+        float
+            The specific heat capacity at the mean temperature (in J/kg-K).
+
+        """
+        if T_f is None or self.fluid_heat_capacity_mode == 'nominal':
+            cp_f = self.fluid.specific_heat()
+        else:
+            T_f = jnp.mean(T_f)
+            cp_f = self.fluid.specific_heat(T_f)
+        return cp_f
 
     def _fluid_temperature(self, xi: Array | float, m_flow: float | Array, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the fluid temperatures.

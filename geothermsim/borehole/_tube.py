@@ -168,7 +168,7 @@ class _Tube(Borehole, ABC):
             Effective borehole thermal resistance (in m-K/W).
 
         """
-        cp_f = self.fluid_specific_heat(T_f=T_f)
+        cp_f = self._fluid_specific_heat(T_f=T_f)
         m_flow_pipe = self.m_flow_pipe(m_flow)
         beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
         a = self._outlet_fluid_temperature_a_in(
@@ -178,29 +178,6 @@ class _Tube(Borehole, ABC):
             self._s_coefs)
         R_b = 0.5 * self.L / (m_flow * cp_f) * (1. + a) / (1. - a)
         return R_b
-
-    def fluid_specific_heat(self, T_f: float | Array | None) -> float:
-        """Fluid specific isobaric heat capacity.
-
-        Parameters
-        ----------
-        T_f : float, array or None, default: None
-            Fluid temperature or array of fluid temperatures
-            (in degree Celsius). If ``None`` or if `fluid_heat_capacity_mode`
-            is set to 'nominal', the nominal fluid temperature is used.
-
-        Returns
-        -------
-        float
-            The specific heat capacity at the mean temperature (in J/kg-K).
-
-        """
-        if T_f is None or self.fluid_heat_capacity_mode == 'nominal':
-            cp_f = self.fluid.specific_heat()
-        else:
-            T_f = jnp.mean(T_f)
-            cp_f = self.fluid.specific_heat(T_f=T_f)
-        return cp_f
 
     def g(self, xi: Array | float, m_flow: float, T_f: float | Array | None = None) -> Tuple[Array | float, Array]:
         """Coefficients to evaluate the heat extraction rate.
@@ -225,7 +202,7 @@ class _Tube(Borehole, ABC):
             temperature.
 
         """
-        cp_f = self.fluid_specific_heat(T_f=T_f)
+        cp_f = self._fluid_specific_heat(T_f=T_f)
         a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f, T_f=T_f)
         return a_in, a_b
 
@@ -251,7 +228,7 @@ class _Tube(Borehole, ABC):
             wall temperature.
 
         """
-        cp_f = self.fluid_specific_heat(T_f)
+        cp_f = self._fluid_specific_heat(T_f)
         a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f, T_f=T_f)
         return a_in, a_b
 
@@ -280,7 +257,7 @@ class _Tube(Borehole, ABC):
             (M, 2,) array of fluid temperatures (in degree Celsius).
 
         """
-        cp_f = self.fluid_specific_heat(T_f)
+        cp_f = self._fluid_specific_heat(T_f)
         a_in, a_b = self._fluid_temperature(xi, m_flow, cp_f, T_f=T_f)
         T_f = a_in * T_f_in + a_b @ T_b
         return T_f
@@ -311,7 +288,7 @@ class _Tube(Borehole, ABC):
             ``float``, then ``M=0``.
 
         """
-        cp_f = self.fluid_specific_heat(T_f)
+        cp_f = self._fluid_specific_heat(T_f)
         a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f, T_f=T_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
@@ -340,7 +317,7 @@ class _Tube(Borehole, ABC):
             is a ``float``, then ``M=0``.
 
         """
-        cp_f = self.fluid_specific_heat(T_f)
+        cp_f = self._fluid_specific_heat(T_f)
         a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f, T_f=T_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
@@ -384,7 +361,7 @@ class _Tube(Borehole, ABC):
             Outlet fluid temperature (in degree Celsius).
 
         """
-        cp_f = self.fluid_specific_heat(T_f)
+        cp_f = self._fluid_specific_heat(T_f)
         a_in, a_b = self._outlet_fluid_temperature(m_flow, cp_f, T_f=T_f)
         T_f_out = a_in * T_f_in + a_b @ T_b
         return T_f_out
@@ -412,6 +389,29 @@ class _Tube(Borehole, ABC):
         """
         R_d = self.thermal_resistances(m_flow, T_f=T_f)
         return 1. / (self.m_flow_pipe(m_flow) * cp_f * R_d)
+
+    def _fluid_specific_heat(self, T_f: float | Array | None) -> float:
+        """Fluid specific isobaric heat capacity.
+
+        Parameters
+        ----------
+        T_f : float, array or None, default: None
+            Fluid temperature or array of fluid temperatures
+            (in degree Celsius). If ``None`` or if `fluid_heat_capacity_mode`
+            is set to 'nominal', the nominal fluid temperature is used.
+
+        Returns
+        -------
+        float
+            The specific heat capacity at the mean temperature (in J/kg-K).
+
+        """
+        if T_f is None or self.fluid_heat_capacity_mode == 'nominal':
+            cp_f = self.fluid.specific_heat()
+        else:
+            T_f = jnp.mean(T_f)
+            cp_f = self.fluid.specific_heat(T_f=T_f)
+        return cp_f
 
     def _fluid_temperature(self, xi: Array | float, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the fluid temperatures.
