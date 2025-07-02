@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from functools import partial
 from time import perf_counter
+from typing import Tuple
 
 from jax import numpy as jnp
 from jax import Array, jit, vmap
@@ -44,7 +45,9 @@ class LoadAggregation(_TemporalSuperposition):
         (`n_cells`+1,) array of start/end times of the aggregation cells
         (in seconds).
     A : array
-        Load shifting matrix.
+        Load shifting vector.
+    B : array
+        Load shifting vector.
     h_to_self : array
         (`n_cells`, `n_boreholes`, `n_nodes`, `n_boreholes`,
         `n_nodes`,) array of thermal response factors at the nodes.
@@ -72,7 +75,7 @@ class LoadAggregation(_TemporalSuperposition):
         self._k = -1
         self.time = self._load_aggregation_cells(dt, tmax, cells_per_level)
         self.n_cells = len(self.time) - 1
-        self.A = self._load_shifting_matrix(self.time)
+        self.A, self.B = self._load_shifting_vectors(self.time)
         self.q = jnp.zeros((len(self.time) - 1, borefield.n_boreholes, borefield.n_nodes))
         if disp:
             print('Initialization start.')
@@ -186,13 +189,15 @@ class LoadAggregation(_TemporalSuperposition):
 
     @staticmethod
     @jit
-    def _next_time_step(A: Array, q: Array) -> Array:
+    def _next_time_step(A: Array, B: Array, q: Array) -> Array:
         """Shift load history.
 
         Parameters
         ----------
         A : array
-            Load shifting matrix.
+            Load shifting vector.
+        B : array
+            Load shifting vector.
         q : array
             (`n_cells`, `n_boreholes`, `n_nodes`,) array of aggregated
             loads in (W/m).
@@ -204,7 +209,9 @@ class LoadAggregation(_TemporalSuperposition):
             loads at next time step (in W/m).
 
         """
-        return jnp.tensordot(A, q, axes=(1, 0))
+        q = q.at[1:].set((q[1:].T * A + q[:-1].T * B).T)
+        q = q.at[0].set(0.)
+        return q
 
     @staticmethod
     def _load_aggregation_cells(dt: float, tmax: float, cells_per_level: int) -> Array:
@@ -238,8 +245,8 @@ class LoadAggregation(_TemporalSuperposition):
         return time
 
     @staticmethod
-    def _load_shifting_matrix(time: Array) -> Array:
-        """Load shifting matrix
+    def _load_shifting_vectors(time: Array) -> Tuple[Array, Array]:
+        """Load shifting vectors
 
         Parameters
         ----------
@@ -254,5 +261,6 @@ class LoadAggregation(_TemporalSuperposition):
         """
         width = jnp.diff(time) / time[1]
         n_times = len(width)
-        A = (1. - 1. / width) * jnp.eye(n_times) + jnp.diag(1. / width[1:], k=-1)
-        return A
+        A = 1. - 1. / width[1:]
+        B = 1. / width[1:]
+        return A, B

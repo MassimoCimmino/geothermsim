@@ -277,7 +277,7 @@ class Simulation:
             m_flow, Q, T_b, T_f_in, T_f_out, q, T, q_history, n_iterations = val
             # Time step
             q_history = self.loadAgg._next_time_step(
-                self.loadAgg.A, q_history)
+                self.loadAgg.A, self.loadAgg.B, q_history)
             time = (i + 1) * self.dt
             current_Q = self.Q[i]
             # Fluid mass flow rate
