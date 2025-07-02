@@ -23,6 +23,15 @@ class Network(Borefield):
         Boreholes in the borefield.
     fluid : fluid
         The fluid.
+    fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+        Determines the value of the fluid specific heat capacity to use in
+        the energy balances:
+
+            - 'nominal': The fluid specific heat capacity is evaluated at the
+            nominal fluid temperature.
+            - 'average': The fluid specific heat capacity is evaluated at the
+            mean fluid temperature in the pipes. This only applies if the
+            fluid temperature is provided as an input to the class methods.
 
     Attributes
     ----------
@@ -52,11 +61,12 @@ class Network(Borefield):
 
     """
 
-    def __init__(self, boreholes: List[SingleUTube], fluid: Fluid):
+    def __init__(self, boreholes: List[SingleUTube], fluid: Fluid, fluid_heat_capacity_mode: str = 'nominal'):
         super().__init__(boreholes)
         self.fluid = fluid
+        self.fluid_heat_capacity_mode = fluid_heat_capacity_mode
 
-    def effective_borefield_thermal_resistance(self, m_flow: float | Array) -> float:
+    def effective_borefield_thermal_resistance(self, m_flow: float | Array, T_f: float | Array | None = None) -> float:
         """Effective borefield thermal resistance.
 
         Parameters
@@ -64,6 +74,11 @@ class Network(Borefield):
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -71,18 +86,41 @@ class Network(Borefield):
             Effective borefield thermal resistance (in m-K/W).
 
         """
-        cp_f = self.fluid.specific_heat()
+        cp_f = self.fluid_specific_heat(T_f)
         m_flow_borehole = self.m_flow_borehole(m_flow)
         m_flow_network = jnp.sum(m_flow)
         a = jnp.average(
-            self._outlet_fluid_temperature(m_flow_borehole, cp_f)[0],
+            self._outlet_fluid_temperature(m_flow_borehole, cp_f, T_f=T_f)[0],
             weights=m_flow_borehole
         )
         # Effective borehole thermal resistance
         R_field = 0.5 * self.L.sum() / (m_flow_network * cp_f) * (1. + a) / (1. - a)
         return R_field
 
-    def g(self, xi: Array | float, m_flow: float | Array) -> Array:
+    def fluid_specific_heat(self, T_f: float | Array | None) -> float:
+        """Fluid specific isobaric heat capacity.
+
+        Parameters
+        ----------
+        T_f : float, array or None, default: None
+            Fluid temperature or array of fluid temperatures
+            (in degree Celsius). If ``None`` or if `fluid_heat_capacity_mode`
+            is set to 'nominal', the nominal fluid temperature is used.
+
+        Returns
+        -------
+        float
+            The specific heat capacity at the mean temperature (in J/kg-K).
+
+        """
+        if T_f is None or self.fluid_heat_capacity_mode == 'nominal':
+            cp_f = self.fluid.specific_heat()
+        else:
+            T_f = jnp.mean(T_f)
+            cp_f = self.fluid.specific_heat(T_f)
+        return cp_f
+
+    def g(self, xi: Array | float, m_flow: float | Array, T_f: float | Array | None = None) -> Array:
         """Coefficients to evaluate the heat extraction rate.
 
         Parameters
@@ -92,6 +130,11 @@ class Network(Borefield):
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -104,15 +147,21 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        a_in, a_b = zip(*[
-            borehole.g(xi, _m_flow)
-            for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
-        ])
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            a_in, a_b = zip(*[
+                borehole.g(xi, _m_flow, T_f=T_f)
+                for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
+            ])
+        else:
+            a_in, a_b = zip(*[
+                borehole.g(xi, _m_flow, T_f=_T_f)
+                for borehole, _m_flow, _T_f in zip(self.boreholes, m_flow_borehole, T_f)
+            ])
         a_in = jnp.stack(a_in, axis=0)
         a_b = jnp.stack(a_b, axis=0)
         return a_in, a_b
 
-    def g_to_self(self, m_flow: float | Array) -> Array:
+    def g_to_self(self, m_flow: float | Array, T_f: float | Array | None = None) -> Array:
         """Coefficients to evaluate the heat extraction rate at nodes.
 
         Parameters
@@ -120,6 +169,11 @@ class Network(Borefield):
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -132,15 +186,21 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        a_in, a_b = zip(*[
-            borehole.g_to_self(_m_flow)
-            for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
-        ])
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            a_in, a_b = zip(*[
+                borehole.g_to_self(_m_flow, T_f=T_f)
+                for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
+            ])
+        else:
+            a_in, a_b = zip(*[
+                borehole.g_to_self(_m_flow, T_f=_T_f)
+                for borehole, _m_flow, _T_f in zip(self.boreholes, m_flow_borehole, T_f)
+            ])
         a_in = jnp.stack(a_in, axis=0)
         a_b = jnp.stack(a_b, axis=0)
         return a_in, a_b
 
-    def fluid_temperature(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float | Array) -> Array:
+    def fluid_temperature(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float | Array, T_f: float | Array | None = None) -> Array:
         """Fluid temperatures.
 
         Parameters
@@ -155,6 +215,11 @@ class Network(Borefield):
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -164,16 +229,25 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        T_f = jnp.stack(
-            [
-                borehole.fluid_temperature(xi, T_f_in, _T_b, _m_flow)
-                for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
-                ],
-            axis=0
-        )
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            T_f = jnp.stack(
+                [
+                    borehole.fluid_temperature(xi, T_f_in, _T_b, _m_flow, T_f=T_f)
+                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    ],
+                axis=0
+            )
+        else:
+            T_f = jnp.stack(
+                [
+                    borehole.fluid_temperature(xi, T_f_in, _T_b, _m_flow, T_f=_T_f)
+                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    ],
+                axis=0
+            )
         return T_f
 
-    def heat_extraction_rate(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float | Array) -> Array:
+    def heat_extraction_rate(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float | Array, T_f: float | Array | None = None) -> Array:
         """Heat extraction rate.
 
         Parameters
@@ -188,6 +262,11 @@ class Network(Borefield):
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -197,16 +276,25 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        q = jnp.stack(
-            [
-                borehole.heat_extraction_rate(xi, T_f_in, _T_b, _m_flow)
-                for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
-                ],
-            axis=0
-        )
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            q = jnp.stack(
+                [
+                    borehole.heat_extraction_rate(xi, T_f_in, _T_b, _m_flow, T_f=T_f)
+                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    ],
+                axis=0
+            )
+        else:
+            q = jnp.stack(
+                [
+                    borehole.heat_extraction_rate(xi, T_f_in, _T_b, _m_flow, T_f=_T_f)
+                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    ],
+                axis=0
+            )
         return q
 
-    def heat_extraction_rate_to_self(self, T_f_in: float, T_b: Array, m_flow: float | Array) -> Array:
+    def heat_extraction_rate_to_self(self, T_f_in: float, T_b: Array, m_flow: float | Array, T_f: float | Array | None = None) -> Array:
         """Heat extraction rate at nodes.
 
         Parameters
@@ -219,6 +307,11 @@ class Network(Borefield):
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -228,13 +321,22 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        q = jnp.stack(
-            [
-                borehole.heat_extraction_rate_to_self(T_f_in, _T_b, _m_flow)
-                for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
-                ],
-            axis=0
-        )
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            q = jnp.stack(
+                [
+                    borehole.heat_extraction_rate_to_self(T_f_in, _T_b, _m_flow, T_f=T_f)
+                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    ],
+                axis=0
+            )
+        else:
+            q = jnp.stack(
+                [
+                    borehole.heat_extraction_rate_to_self(T_f_in, _T_b, _m_flow, T_f=_T_f)
+                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    ],
+                axis=0
+            )
         return q
 
     def m_flow_borehole(self, m_flow: float | Array) -> Array:
@@ -260,7 +362,7 @@ class Network(Borefield):
             )
         return m_flow
 
-    def outlet_fluid_temperature(self, T_f_in: float, T_b: Array, m_flow: float | Array) -> Array:
+    def outlet_fluid_temperature(self, T_f_in: float, T_b: Array, m_flow: float | Array, T_f: float | Array | None = None) -> Array:
         """Outlet fluid temperatures.
 
         Parameters
@@ -273,6 +375,11 @@ class Network(Borefield):
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -283,16 +390,25 @@ class Network(Borefield):
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
         m_flow_network = jnp.sum(m_flow)
-        T_f_out = jnp.stack(
-            [
-                borehole.outlet_fluid_temperature(T_f_in, _T_b, _m_flow)
-                for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
-                ],
-            axis=0
-        ) @ m_flow_borehole / m_flow_network
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            T_f_out = jnp.stack(
+                [
+                    borehole.outlet_fluid_temperature(T_f_in, _T_b, _m_flow, T_f=T_f)
+                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    ],
+                axis=0
+            ) @ m_flow_borehole / m_flow_network
+        else:
+            T_f_out = jnp.stack(
+                [
+                    borehole.outlet_fluid_temperature(T_f_in, _T_b, _m_flow, T_f=_T_f)
+                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    ],
+                axis=0
+            ) @ m_flow_borehole / m_flow_network
         return T_f_out
 
-    def _fluid_temperature(self, xi: Array | float, m_flow: float | Array, cp_f: float) -> Tuple[Array, Array]:
+    def _fluid_temperature(self, xi: Array | float, m_flow: float | Array, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the fluid temperatures.
 
         Parameters
@@ -304,6 +420,11 @@ class Network(Borefield):
             array of fluid mass flow rate per borehole.
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -316,15 +437,21 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        a_in, a_b = zip(*[
-            borehole._fluid_temperature(xi, _m_flow, cp_f)
-            for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
-        ])
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            a_in, a_b = zip(*[
+                borehole._fluid_temperature(xi, _m_flow, cp_f, T_f=T_f)
+                for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
+            ])
+        else:
+            a_in, a_b = zip(*[
+                borehole._fluid_temperature(xi, _m_flow, cp_f, T_f=_T_f)
+                for borehole, _m_flow, _T_f in zip(self.boreholes, m_flow_borehole, T_f)
+            ])
         a_in = jnp.stack(a_in, axis=0)
         a_b = jnp.stack(a_b, axis=0)
         return a_in, a_b
 
-    def _heat_extraction_rate(self, xi: Array | float, m_flow: float | Array, cp_f: float) -> Tuple[Array, Array]:
+    def _heat_extraction_rate(self, xi: Array | float, m_flow: float | Array, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the heat extraction rate.
 
         Parameters
@@ -336,6 +463,11 @@ class Network(Borefield):
             array of fluid mass flow rate per borehole.
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -348,15 +480,21 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        a_in, a_b = zip(*[
-            borehole._heat_extraction_rate(xi, _m_flow, cp_f)
-            for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
-        ])
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            a_in, a_b = zip(*[
+                borehole._heat_extraction_rate(xi, _m_flow, cp_f, T_f=T_f)
+                for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
+            ])
+        else:
+            a_in, a_b = zip(*[
+                borehole._heat_extraction_rate(xi, _m_flow, cp_f, T_f=_T_f)
+                for borehole, _m_flow, _T_f in zip(self.boreholes, m_flow_borehole, T_f)
+            ])
         a_in = jnp.stack(a_in, axis=0)
         a_b = jnp.stack(a_b, axis=0)
         return a_in, a_b
 
-    def _outlet_fluid_temperature(self, m_flow: float | Array, cp_f: float) -> Tuple[Array, Array]:
+    def _outlet_fluid_temperature(self, m_flow: float | Array, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the outlet fluid temperatures.
 
         Parameters
@@ -366,6 +504,11 @@ class Network(Borefield):
             array of fluid mass flow rate per borehole.
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -378,16 +521,22 @@ class Network(Borefield):
 
         """
         m_flow_borehole = self.m_flow_borehole(m_flow)
-        a_in, a_b = zip(*[
-            borehole._outlet_fluid_temperature(_m_flow, cp_f)
-            for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
-        ])
+        if T_f is None or len(jnp.shape(T_f)) == 0:
+            a_in, a_b = zip(*[
+                borehole._outlet_fluid_temperature(_m_flow, cp_f, T_f=T_f)
+                for borehole, _m_flow in zip(self.boreholes, m_flow_borehole)
+            ])
+        else:
+            a_in, a_b = zip(*[
+                borehole._outlet_fluid_temperature(_m_flow, cp_f, T_f=_T_f)
+                for borehole, _m_flow, _T_f in zip(self.boreholes, m_flow_borehole, T_f)
+            ])
         a_in = jnp.stack(a_in, axis=0)
         a_b = jnp.stack(a_b, axis=0)
         return a_in, a_b
 
     @classmethod
-    def from_dimensions(cls, L: ArrayLike, D: ArrayLike, r_b: ArrayLike, x: ArrayLike, y: ArrayLike, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21) -> Self:
+    def from_dimensions(cls, L: ArrayLike, D: ArrayLike, r_b: ArrayLike, x: ArrayLike, y: ArrayLike, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, fluid_heat_capacity_mode: str = 'nominal') -> Self:
         """Field of straight boreholes from their dimensions.
 
         Parameters
@@ -432,6 +581,15 @@ class Network(Borefield):
             response factors to nodes on the borehole. Corresponds to the
             number of quadrature points along each subinterval delimited
             by nodes and edges of the segments.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the pipes. This only applies if the
+                fluid temperature is provided as an input to the class methods.
 
         Returns
         -------
@@ -457,11 +615,11 @@ class Network(Borefield):
         boreholes = []
         for j in range(n_boreholes):
             path = Path.Line(L[j], D[j], x[j], y[j], tilt[j], orientation[j])
-            boreholes.append(SingleUTube(R_d, fluid, r_b[j], path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self))
-        return cls(boreholes, fluid)
+            boreholes.append(SingleUTube(R_d, fluid, r_b[j], path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, fluid_heat_capacity_mode=fluid_heat_capacity_mode))
+        return cls(boreholes, fluid, fluid_heat_capacity_mode=fluid_heat_capacity_mode)
 
     @classmethod
-    def rectangle_field(cls, N_1: int, N_2: int, B_1: float, B_2: float, L: float, D: float, r_b: float, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, basis: Basis, n_segments: int, segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21) -> Self:
+    def rectangle_field(cls, N_1: int, N_2: int, B_1: float, B_2: float, L: float, D: float, r_b: float, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, basis: Basis, n_segments: int, segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, fluid_heat_capacity_mode: str = 'nominal') -> Self:
         """Field of vertical boreholes in a rectangular configuration.
 
         Parameters
@@ -500,6 +658,15 @@ class Network(Borefield):
             response factors to nodes on the borehole. Corresponds to the
             number of quadrature points along each subinterval delimited
             by nodes and edges of the segments.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the pipes. This only applies if the
+                fluid temperature is provided as an input to the class methods.
 
         Returns
         -------
@@ -510,5 +677,5 @@ class Network(Borefield):
         # Borehole positions and orientation
         x = jnp.tile(jnp.arange(N_1), N_2) * B_1
         y = jnp.repeat(jnp.arange(N_2), N_1) * B_2
-        return cls.from_dimensions(L, D, r_b, x, y, R_d, fluid, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self)
+        return cls.from_dimensions(L, D, r_b, x, y, R_d, fluid, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, fluid_heat_capacity_mode=fluid_heat_capacity_mode)
         

@@ -49,6 +49,15 @@ class _Tube(Borehole, ABC):
         by nodes and edges of the segments.
     parallel : bool, default: True
         True if pipes are in parallel. False if pipes are in series.
+    fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+        Determines the value of the fluid specific heat capacity to use in
+        the energy balances:
+
+            - 'nominal': The fluid specific heat capacity is evaluated at the
+            nominal fluid temperature.
+            - 'average': The fluid specific heat capacity is evaluated at the
+            mean fluid temperature in the pipes. This only applies if the
+            fluid temperature is provided as an input to the class methods.
 
     Attributes
     ----------
@@ -81,14 +90,14 @@ class _Tube(Borehole, ABC):
 
     """
 
-    def __init__(self, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, r_b: float, path: Path, basis: Basis, n_segments: int, segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True):
+    def __init__(self, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, r_b: float, path: Path, basis: Basis, n_segments: int, segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True, fluid_heat_capacity_mode: str = 'nominal'):
         # Runtime type validation
         if not isinstance(R_d, ArrayLike) and not callable(R_d):
             raise TypeError(f"Expected arraylike or callable input; got {R_d}")
         # Convert input to jax.Array
         if isinstance(R_d, ArrayLike):
             R_d = jnp.atleast_2d(R_d)
-            def thermal_resistances(m_flow: float) -> Array:
+            def thermal_resistances(m_flow: float, T_f: float | Array | None = None) -> Array:
                 return R_d
             self.thermal_resistances = thermal_resistances
         else:
@@ -100,6 +109,7 @@ class _Tube(Borehole, ABC):
         self.R_d = R_d
         self.fluid = fluid
         self.parallel = parallel
+        self.fluid_heat_capacity_mode = fluid_heat_capacity_mode
         shape = jnp.shape(self.thermal_resistances(1.))
         self.n_pipes = shape[0]
         self._n_pipes_over_two = int(self.n_pipes / 2)
@@ -140,13 +150,17 @@ class _Tube(Borehole, ABC):
             ])
         self._top_connectivity = (_top_connectivity_in, _top_connectivity_u)
 
-    def effective_borehole_thermal_resistance(self, m_flow: float) -> float:
+    def effective_borehole_thermal_resistance(self, m_flow: float, T_f: float | Array | None = None) -> float:
         """Effective borehole thermal resistance.
 
         Parameters
         ----------
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -154,9 +168,9 @@ class _Tube(Borehole, ABC):
             Effective borehole thermal resistance (in m-K/W).
 
         """
-        cp_f = self.fluid.specific_heat()
+        cp_f = self.fluid_specific_heat(T_f=T_f)
         m_flow_pipe = self.m_flow_pipe(m_flow)
-        beta_ij = self._beta_ij(m_flow, cp_f)
+        beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
         a = self._outlet_fluid_temperature_a_in(
             beta_ij,
             self._top_connectivity,
@@ -165,7 +179,30 @@ class _Tube(Borehole, ABC):
         R_b = 0.5 * self.L / (m_flow * cp_f) * (1. + a) / (1. - a)
         return R_b
 
-    def g(self, xi: Array | float, m_flow: float) -> Tuple[Array | float, Array]:
+    def fluid_specific_heat(self, T_f: float | Array | None) -> float:
+        """Fluid specific isobaric heat capacity.
+
+        Parameters
+        ----------
+        T_f : float, array or None, default: None
+            Fluid temperature or array of fluid temperatures
+            (in degree Celsius). If ``None`` or if `fluid_heat_capacity_mode`
+            is set to 'nominal', the nominal fluid temperature is used.
+
+        Returns
+        -------
+        float
+            The specific heat capacity at the mean temperature (in J/kg-K).
+
+        """
+        if T_f is None or self.fluid_heat_capacity_mode == 'nominal':
+            cp_f = self.fluid.specific_heat()
+        else:
+            T_f = jnp.mean(T_f)
+            cp_f = self.fluid.specific_heat(T_f=T_f)
+        return cp_f
+
+    def g(self, xi: Array | float, m_flow: float, T_f: float | Array | None = None) -> Tuple[Array | float, Array]:
         """Coefficients to evaluate the heat extraction rate.
 
         Parameters
@@ -174,6 +211,10 @@ class _Tube(Borehole, ABC):
             (M,) array of coordinates along the borehole.
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -184,17 +225,21 @@ class _Tube(Borehole, ABC):
             temperature.
 
         """
-        cp_f = self.fluid.specific_heat()
-        a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f)
+        cp_f = self.fluid_specific_heat(T_f=T_f)
+        a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f, T_f=T_f)
         return a_in, a_b
 
-    def g_to_self(self, m_flow: float) -> Tuple[Array, Array]:
+    def g_to_self(self, m_flow: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the heat extraction rate at nodes.
 
         Parameters
         ----------
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -206,11 +251,11 @@ class _Tube(Borehole, ABC):
             wall temperature.
 
         """
-        cp_f = self.fluid.specific_heat()
-        a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f)
+        cp_f = self.fluid_specific_heat(T_f)
+        a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f, T_f=T_f)
         return a_in, a_b
 
-    def fluid_temperature(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float) -> Array:
+    def fluid_temperature(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> Array:
         """Fluid temperatures.
 
         Parameters
@@ -224,6 +269,10 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -231,13 +280,12 @@ class _Tube(Borehole, ABC):
             (M, 2,) array of fluid temperatures (in degree Celsius).
 
         """
-        cp_f = self.fluid.specific_heat()
-        beta_ij = self._beta_ij(m_flow, cp_f)
-        a_in, a_b = self._fluid_temperature(xi, m_flow, cp_f)
+        cp_f = self.fluid_specific_heat(T_f)
+        a_in, a_b = self._fluid_temperature(xi, m_flow, cp_f, T_f=T_f)
         T_f = a_in * T_f_in + a_b @ T_b
         return T_f
 
-    def heat_extraction_rate(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float) -> Array | float:
+    def heat_extraction_rate(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> Array | float:
         """Heat extraction rate.
 
         Parameters
@@ -251,6 +299,10 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -259,12 +311,12 @@ class _Tube(Borehole, ABC):
             ``float``, then ``M=0``.
 
         """
-        cp_f = self.fluid.specific_heat()
-        a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f)
+        cp_f = self.fluid_specific_heat(T_f)
+        a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f, T_f=T_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
 
-    def heat_extraction_rate_to_self(self, T_f_in: float, T_b: Array, m_flow: float) -> Array:
+    def heat_extraction_rate_to_self(self, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> Array:
         """Heat extraction rate at nodes.
 
         Parameters
@@ -276,6 +328,10 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -284,8 +340,8 @@ class _Tube(Borehole, ABC):
             is a ``float``, then ``M=0``.
 
         """
-        cp_f = self.fluid.specific_heat()
-        a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f)
+        cp_f = self.fluid_specific_heat(T_f)
+        a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f, T_f=T_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
 
@@ -305,7 +361,7 @@ class _Tube(Borehole, ABC):
         """
         return self._m_flow_factor * m_flow
 
-    def outlet_fluid_temperature(self, T_f_in: float, T_b: Array, m_flow: float) -> float:
+    def outlet_fluid_temperature(self, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> float:
         """Outlet fluid temperature.
 
         Parameters
@@ -317,6 +373,10 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -324,12 +384,12 @@ class _Tube(Borehole, ABC):
             Outlet fluid temperature (in degree Celsius).
 
         """
-        cp_f = self.fluid.specific_heat()
-        a_in, a_b = self._outlet_fluid_temperature(m_flow, cp_f)
+        cp_f = self.fluid_specific_heat(T_f)
+        a_in, a_b = self._outlet_fluid_temperature(m_flow, cp_f, T_f=T_f)
         T_f_out = a_in * T_f_in + a_b @ T_b
         return T_f_out
 
-    def _beta_ij(self, m_flow: float, cp_f: float) -> Array:
+    def _beta_ij(self, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> Array:
         """Thermal conductance coefficients.
 
         Parameters
@@ -338,6 +398,10 @@ class _Tube(Borehole, ABC):
             Fluid mass flow rate (in kg/s).
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -346,10 +410,10 @@ class _Tube(Borehole, ABC):
             coefficients.
 
         """
-        R_d = self.thermal_resistances(m_flow)
+        R_d = self.thermal_resistances(m_flow, T_f=T_f)
         return 1. / (self.m_flow_pipe(m_flow) * cp_f * R_d)
 
-    def _fluid_temperature(self, xi: Array | float, m_flow: float, cp_f: float) -> Tuple[Array, Array]:
+    def _fluid_temperature(self, xi: Array | float, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the fluid temperatures.
 
         Parameters
@@ -360,6 +424,10 @@ class _Tube(Borehole, ABC):
             Fluid mass flow rate (in kg/s).
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -371,7 +439,7 @@ class _Tube(Borehole, ABC):
             borehole wall temperature.
 
         """
-        beta_ij = self._beta_ij(m_flow, cp_f)
+        beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
         if len(jnp.shape(xi)) > 0:
             xi_p, index = vmap(
                 self._segment_coordinate,
@@ -417,7 +485,7 @@ class _Tube(Borehole, ABC):
             )
         return a_in, a_b
 
-    def _heat_extraction_rate(self, xi: Array | float, m_flow: float, cp_f: float) -> Tuple[Array | float, Array]:
+    def _heat_extraction_rate(self, xi: Array | float, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array | float, Array]:
         """Coefficients to evaluate the heat extraction rate.
 
         Parameters
@@ -428,6 +496,10 @@ class _Tube(Borehole, ABC):
             Fluid mass flow rate (in kg/s).
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -439,7 +511,7 @@ class _Tube(Borehole, ABC):
 
         """
         m_flow_pipe = self.m_flow_pipe(m_flow)
-        beta_ij = self._beta_ij(m_flow, cp_f)
+        beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
         if len(jnp.shape(xi)) > 0:
             xi_p, index = vmap(
                 self._segment_coordinate,
@@ -500,7 +572,7 @@ class _Tube(Borehole, ABC):
             )
         return a_in, a_b
 
-    def _heat_extraction_rate_to_self(self, m_flow: float, cp_f: float) -> Tuple[Array | float, Array]:
+    def _heat_extraction_rate_to_self(self, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array | float, Array]:
         """Coefficients to evaluate the heat extraction rate.
 
         Parameters
@@ -509,6 +581,10 @@ class _Tube(Borehole, ABC):
             Fluid mass flow rate (in kg/s).
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -520,7 +596,7 @@ class _Tube(Borehole, ABC):
 
         """
         m_flow_pipe = self.m_flow_pipe(m_flow)
-        beta_ij = self._beta_ij(m_flow, cp_f)
+        beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
         xi_p = self.basis.xi
         index = jnp.arange(self.n_segments)
         a_in = vmap(
@@ -560,7 +636,7 @@ class _Tube(Borehole, ABC):
         )
         return a_in.flatten(), a_b.reshape(self.n_nodes, self.n_nodes)
 
-    def _outlet_fluid_temperature(self, m_flow: float, cp_f: float) -> Tuple[float, Array]:
+    def _outlet_fluid_temperature(self, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> Tuple[float, Array]:
         """Coefficients to evaluate the outlet fluid temperature.
 
         Parameters
@@ -569,6 +645,10 @@ class _Tube(Borehole, ABC):
             Fluid mass flow rate (in kg/s).
         cp_f : float
             Fluid specific isobaric heat capacity (in J/kg-K).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -579,7 +659,7 @@ class _Tube(Borehole, ABC):
             temperature.
 
         """
-        beta_ij = self._beta_ij(m_flow, cp_f)
+        beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
         a_in = self._outlet_fluid_temperature_a_in(
             beta_ij,
             self._top_connectivity,
@@ -880,7 +960,7 @@ class _Tube(Borehole, ABC):
         ...
 
     @classmethod
-    def from_dimensions(cls, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, L: float, D: float, r_b: float, x: float, y: float, basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True) -> Self:
+    def from_dimensions(cls, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, L: float, D: float, r_b: float, x: float, y: float, basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True, fluid_heat_capacity_mode: str = 'nominal') -> Self:
         """Straight borehole from its dimensions.
 
         Parameters
@@ -927,6 +1007,16 @@ class _Tube(Borehole, ABC):
             by nodes and edges of the segments.
         parallel : bool, default: True
             True if pipes are in parallel. False if pipes are in series.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use
+            in the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at
+                the nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at
+                the mean fluid temperature in the pipes. This only applies if
+                the fluid temperature is provided as an input to the class
+                methods.
 
         Returns
         -------
@@ -935,4 +1025,4 @@ class _Tube(Borehole, ABC):
 
         """
         path = Path.Line(L, D, x, y, tilt, orientation)
-        return cls(R_d, fluid, r_b, path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, parallel=parallel)
+        return cls(R_d, fluid, r_b, path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, parallel=parallel, fluid_heat_capacity_mode=fluid_heat_capacity_mode)

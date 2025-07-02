@@ -99,13 +99,17 @@ class UTubeHeatExchanger(_GroundHeatExchanger):
             self.r_b, self.r_p_out, self.p, self.k_s, self.k_b, J=self.J)
 
     @partial(jit, static_argnames=['self'])
-    def thermal_resistances(self, m_flow: float) -> Array:
+    def thermal_resistances(self, m_flow: float, T_f: float | Array | None = None) -> Array:
         """Evaluate delta-circuit thermal resistances.
 
         Parameters
         ----------
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -116,16 +120,36 @@ class UTubeHeatExchanger(_GroundHeatExchanger):
         """
         m_flow_pipe = self._m_flow_factor * m_flow
         # Fluid physical properties
-        rho_f = self.fluid.density()
-        mu_f = self.fluid.viscosity()
-        k_f = self.fluid.conductivity()
-        Pr = self.fluid.prandtl()
+        rho_f = jnp.broadcast_to(
+            self.fluid.density(T_f),
+            self.n_pipes
+        )
+        mu_f = jnp.broadcast_to(
+            self.fluid.viscosity(T_f),
+            self.n_pipes
+        )
+        k_f = jnp.broadcast_to(
+            self.fluid.conductivity(T_f),
+            self.n_pipes
+        )
+        Pr = jnp.broadcast_to(
+            self.fluid.prandtl(T_f),
+            self.n_pipes
+        )
         # Convection thermal resistance in circular pipes
         h_fluid = vmap(
             convective_heat_transfer_coefficient_circular_pipe,
-            in_axes=(None, 0, None, None, None, None, None),
+            in_axes=(None, 0, 0, 0, 0, 0, None),
             out_axes=0
-        )(m_flow_pipe, self.r_p_in, mu_f, rho_f, k_f, Pr, self.epsilon)
+        )(
+            m_flow_pipe,
+            self.r_p_in,
+            mu_f,
+            rho_f,
+            k_f,
+            Pr,
+            self.epsilon
+        )
         R_f = 1 / (2 * jnp.pi * self.r_p_in * h_fluid)
         # Delta-circuit thermal resistances through grout
         R_fp = R_f + self.R_p
