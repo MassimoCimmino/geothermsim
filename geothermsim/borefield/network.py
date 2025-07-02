@@ -233,7 +233,7 @@ class Network(Borefield):
             T_f = jnp.stack(
                 [
                     borehole.fluid_temperature(xi, T_f_in, _T_b, _m_flow, T_f=T_f)
-                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    for borehole, _T_b, _m_flow in zip(self.boreholes, T_b, m_flow_borehole)
                     ],
                 axis=0
             )
@@ -241,7 +241,7 @@ class Network(Borefield):
             T_f = jnp.stack(
                 [
                     borehole.fluid_temperature(xi, T_f_in, _T_b, _m_flow, T_f=_T_f)
-                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    for borehole, _T_b, _m_flow, _T_f in zip(self.boreholes, T_b, m_flow_borehole, T_f)
                     ],
                 axis=0
             )
@@ -280,7 +280,7 @@ class Network(Borefield):
             q = jnp.stack(
                 [
                     borehole.heat_extraction_rate(xi, T_f_in, _T_b, _m_flow, T_f=T_f)
-                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    for borehole, _T_b, _m_flow in zip(self.boreholes, T_b, m_flow_borehole)
                     ],
                 axis=0
             )
@@ -288,7 +288,7 @@ class Network(Borefield):
             q = jnp.stack(
                 [
                     borehole.heat_extraction_rate(xi, T_f_in, _T_b, _m_flow, T_f=_T_f)
-                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    for borehole, _T_b, _m_flow, _T_f in zip(self.boreholes, T_b, m_flow_borehole, T_f)
                     ],
                 axis=0
             )
@@ -325,7 +325,7 @@ class Network(Borefield):
             q = jnp.stack(
                 [
                     borehole.heat_extraction_rate_to_self(T_f_in, _T_b, _m_flow, T_f=T_f)
-                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    for borehole, _T_b, _m_flow in zip(self.boreholes, T_b, m_flow_borehole)
                     ],
                 axis=0
             )
@@ -333,7 +333,7 @@ class Network(Borefield):
             q = jnp.stack(
                 [
                     borehole.heat_extraction_rate_to_self(T_f_in, _T_b, _m_flow, T_f=_T_f)
-                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    for borehole, _T_b, _m_flow, _T_f in zip(self.boreholes, T_b, m_flow_borehole, T_f)
                     ],
                 axis=0
             )
@@ -394,7 +394,7 @@ class Network(Borefield):
             T_f_out = jnp.stack(
                 [
                     borehole.outlet_fluid_temperature(T_f_in, _T_b, _m_flow, T_f=T_f)
-                    for borehole, (_T_b, _m_flow) in zip(self.boreholes, T_b, m_flow_borehole)
+                    for borehole, _T_b, _m_flow in zip(self.boreholes, T_b, m_flow_borehole)
                     ],
                 axis=0
             ) @ m_flow_borehole / m_flow_network
@@ -402,7 +402,7 @@ class Network(Borefield):
             T_f_out = jnp.stack(
                 [
                     borehole.outlet_fluid_temperature(T_f_in, _T_b, _m_flow, T_f=_T_f)
-                    for borehole, (_T_b, _m_flow, _T_f) in zip(self.boreholes, T_b, m_flow_borehole, T_f)
+                    for borehole, _T_b, _m_flow, _T_f in zip(self.boreholes, T_b, m_flow_borehole, T_f)
                     ],
                 axis=0
             ) @ m_flow_borehole / m_flow_network
