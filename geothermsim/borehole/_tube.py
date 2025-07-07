@@ -6,6 +6,7 @@ from typing import Self, Tuple
 
 from jax import numpy as jnp
 from jax import Array, jit, vmap
+from jax.lax import while_loop
 from jax.typing import ArrayLike
 
 from ..basis import Basis
@@ -49,15 +50,6 @@ class _Tube(Borehole, ABC):
         by nodes and edges of the segments.
     parallel : bool, default: True
         True if pipes are in parallel. False if pipes are in series.
-    fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
-        Determines the value of the fluid specific heat capacity to use in
-        the energy balances:
-
-            - 'nominal': The fluid specific heat capacity is evaluated at the
-            nominal fluid temperature.
-            - 'average': The fluid specific heat capacity is evaluated at the
-            mean fluid temperature in the pipes. This only applies if the
-            fluid temperature is provided as an input to the class methods.
 
     Attributes
     ----------
@@ -89,8 +81,20 @@ class _Tube(Borehole, ABC):
         Jacobian.
 
     """
-
-    def __init__(self, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, r_b: float, path: Path, basis: Basis, n_segments: int, segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True, fluid_heat_capacity_mode: str = 'nominal'):
+ 
+    def __init__(
+        self,
+        R_d: ArrayLike | Callable[[float], Array],
+        fluid: Fluid,
+        r_b: float,
+        path: Path,
+        basis: Basis,
+        n_segments: int,
+        segment_ratios: ArrayLike | None = None,
+        order: int = 101,
+        order_to_self: int = 21,
+        parallel: bool = True
+    ):
         # Runtime type validation
         if not isinstance(R_d, ArrayLike) and not callable(R_d):
             raise TypeError(f"Expected arraylike or callable input; got {R_d}")
@@ -109,7 +113,6 @@ class _Tube(Borehole, ABC):
         self.R_d = R_d
         self.fluid = fluid
         self.parallel = parallel
-        self.fluid_heat_capacity_mode = fluid_heat_capacity_mode
         shape = jnp.shape(self.thermal_resistances(1.))
         self.n_pipes = shape[0]
         self._n_pipes_over_two = int(self.n_pipes / 2)
@@ -150,17 +153,52 @@ class _Tube(Borehole, ABC):
             ])
         self._top_connectivity = (_top_connectivity_in, _top_connectivity_u)
 
-    def effective_borehole_thermal_resistance(self, m_flow: float, T_f: float | Array | None = None) -> float:
+    def effective_borehole_thermal_resistance(
+        self,
+        T_f_in: float,
+        T_b: Array,
+        m_flow: float,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal',
+        tolT: float = 1e-3
+        ) -> float:
         """Effective borehole thermal resistance.
 
         Parameters
         ----------
+        T_f_in : float
+            Inlet fluid temperature (in degree Celsius).
+        T_b : array
+            (`n_nodes`,) array of borehole wall temperatures (in degree
+            Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        T_f : float, array or None, default: None
-            Fluid temperature or (`n_pipes`,) array of fluid
-            temperatures in each pipe (in degree Celcius). If
-            ``None``, the nominal fluid temperature is used.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the borefield.
+    
+            The modes 'average' triggers iterations during the simulation.
+        thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
+            Determines the value of the thermal resistances to use in the
+            borehole model:
+    
+                - 'nominal': The thermal resistances are evaluated at the nominal
+                fluid temperature.
+                - 'average': The thermal resistances are evaluated at the mean
+                fluid temperature in the borehole.
+                - 'per-pipe': The thermal resistances are evaluated at the fluid
+                temperature in each pipe, evaluated at mid-depth.
+    
+            The modes 'average' and 'per-pipe' trigger iterations during the
+            simulation.
+        tolT : float, default: 1e-3
+            Absolute tolerance on fluid temperatures during iterative
+            simulation steps.
 
         Returns
         -------
@@ -168,71 +206,20 @@ class _Tube(Borehole, ABC):
             Effective borehole thermal resistance (in m-K/W).
 
         """
-        cp_f = self._fluid_specific_heat(T_f=T_f)
-        m_flow_pipe = self.m_flow_pipe(m_flow)
-        beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
-        a = self._outlet_fluid_temperature_a_in(
-            beta_ij,
-            self._top_connectivity,
-            self._mixing,
-            self._s_coefs)
-        R_b = 0.5 * self.L / (m_flow * cp_f) * (1. + a) / (1. - a)
+        T_f, cp_f = self._reference_fluid_conditions(T_f_in, T_b, m_flow, fluid_heat_capacity_mode, thermal_resistances_mode, tolT)
+        R_b = self._effective_borehole_thermal_resistance(m_flow, cp_f, T_f)
         return R_b
 
-    def g(self, xi: Array | float, m_flow: float, T_f: float | Array | None = None) -> Tuple[Array | float, Array]:
-        """Coefficients to evaluate the heat extraction rate.
-
-        Parameters
-        ----------
-        xi : array or float
-            (M,) array of coordinates along the borehole.
-        m_flow : float
-            Fluid mass flow rate (in kg/s).
-        T_f : float, array or None, default: None
-            Fluid temperature or (`n_pipes`,) array of fluid
-            temperatures in each pipe (in degree Celcius). If
-            ``None``, the nominal fluid temperature is used.
-
-        Returns
-        -------
-        a_in : array or float
-            (M,) array of coefficients for the inlet fluid temperature.
-        a_b : array
-            (M, `n_nodes`,) array of coefficients for the borehole wall
-            temperature.
-
-        """
-        cp_f = self._fluid_specific_heat(T_f=T_f)
-        a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f, T_f=T_f)
-        return a_in, a_b
-
-    def g_to_self(self, m_flow: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
-        """Coefficients to evaluate the heat extraction rate at nodes.
-
-        Parameters
-        ----------
-        m_flow : float
-            Fluid mass flow rate (in kg/s).
-        T_f : float, array or None, default: None
-            Fluid temperature or (`n_pipes`,) array of fluid
-            temperatures in each pipe (in degree Celcius). If
-            ``None``, the nominal fluid temperature is used.
-
-        Returns
-        -------
-        a_in : array
-            (`n_nodes`,) array of coefficients for the inlet fluid
-            temperature.
-        a_b : array
-            (`n_nodes`, `n_nodes`,) array of coefficients for the borehole
-            wall temperature.
-
-        """
-        cp_f = self._fluid_specific_heat(T_f)
-        a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f, T_f=T_f)
-        return a_in, a_b
-
-    def fluid_temperature(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> Array:
+    def fluid_temperature(
+        self,
+        xi: Array | float,
+        T_f_in: float,
+        T_b: Array,
+        m_flow: float,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal',
+        tolT: float = 1e-3
+        ) -> Array:
         """Fluid temperatures.
 
         Parameters
@@ -246,10 +233,32 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        T_f : float, array or None, default: None
-            Fluid temperature or (`n_pipes`,) array of fluid
-            temperatures in each pipe (in degree Celcius). If
-            ``None``, the nominal fluid temperature is used.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the borefield.
+    
+            The modes 'average' triggers iterations during the simulation.
+        thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
+            Determines the value of the thermal resistances to use in the
+            borehole model:
+    
+                - 'nominal': The thermal resistances are evaluated at the nominal
+                fluid temperature.
+                - 'average': The thermal resistances are evaluated at the mean
+                fluid temperature in the borehole.
+                - 'per-pipe': The thermal resistances are evaluated at the fluid
+                temperature in each pipe, evaluated at mid-depth.
+    
+            The modes 'average' and 'per-pipe' trigger iterations during the
+            simulation.
+        tolT : float, default: 1e-3
+            Absolute tolerance on fluid temperatures during iterative
+            simulation steps.
 
         Returns
         -------
@@ -257,12 +266,21 @@ class _Tube(Borehole, ABC):
             (M, 2,) array of fluid temperatures (in degree Celsius).
 
         """
-        cp_f = self._fluid_specific_heat(T_f)
+        T_f, cp_f = self._reference_fluid_conditions(T_f_in, T_b, m_flow, fluid_heat_capacity_mode, thermal_resistances_mode, tolT)
         a_in, a_b = self._fluid_temperature(xi, m_flow, cp_f, T_f=T_f)
         T_f = a_in * T_f_in + a_b @ T_b
         return T_f
 
-    def heat_extraction_rate(self, xi: Array | float, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> Array | float:
+    def heat_extraction_rate(
+        self,
+        xi: Array | float,
+        T_f_in: float,
+        T_b: Array,
+        m_flow: float,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal',
+        tolT: float = 1e-3
+        ) -> Array | float:
         """Heat extraction rate.
 
         Parameters
@@ -276,10 +294,32 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        T_f : float, array or None, default: None
-            Fluid temperature or (`n_pipes`,) array of fluid
-            temperatures in each pipe (in degree Celcius). If
-            ``None``, the nominal fluid temperature is used.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the borefield.
+    
+            The modes 'average' triggers iterations during the simulation.
+        thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
+            Determines the value of the thermal resistances to use in the
+            borehole model:
+    
+                - 'nominal': The thermal resistances are evaluated at the nominal
+                fluid temperature.
+                - 'average': The thermal resistances are evaluated at the mean
+                fluid temperature in the borehole.
+                - 'per-pipe': The thermal resistances are evaluated at the fluid
+                temperature in each pipe, evaluated at mid-depth.
+    
+            The modes 'average' and 'per-pipe' trigger iterations during the
+            simulation.
+        tolT : float, default: 1e-3
+            Absolute tolerance on fluid temperatures during iterative
+            simulation steps.
 
         Returns
         -------
@@ -288,12 +328,21 @@ class _Tube(Borehole, ABC):
             ``float``, then ``M=0``.
 
         """
-        cp_f = self._fluid_specific_heat(T_f)
+        T_f, cp_f = self._reference_fluid_conditions(T_f_in, T_b, m_flow, fluid_heat_capacity_mode, thermal_resistances_mode, tolT)
         a_in, a_b = self._heat_extraction_rate(xi, m_flow, cp_f, T_f=T_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
 
-    def heat_extraction_rate_to_self(self, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> Array:
+    def heat_extraction_rate_to_self(
+        self,
+        xi: Array | float,
+        T_f_in: float,
+        T_b: Array,
+        m_flow: float,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal',
+        tolT: float = 1e-3
+        ) -> Array:
         """Heat extraction rate at nodes.
 
         Parameters
@@ -305,10 +354,32 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        T_f : float, array or None, default: None
-            Fluid temperature or (`n_pipes`,) array of fluid
-            temperatures in each pipe (in degree Celcius). If
-            ``None``, the nominal fluid temperature is used.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the borefield.
+    
+            The modes 'average' triggers iterations during the simulation.
+        thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
+            Determines the value of the thermal resistances to use in the
+            borehole model:
+    
+                - 'nominal': The thermal resistances are evaluated at the nominal
+                fluid temperature.
+                - 'average': The thermal resistances are evaluated at the mean
+                fluid temperature in the borehole.
+                - 'per-pipe': The thermal resistances are evaluated at the fluid
+                temperature in each pipe, evaluated at mid-depth.
+    
+            The modes 'average' and 'per-pipe' trigger iterations during the
+            simulation.
+        tolT : float, default: 1e-3
+            Absolute tolerance on fluid temperatures during iterative
+            simulation steps.
 
         Returns
         -------
@@ -317,7 +388,7 @@ class _Tube(Borehole, ABC):
             is a ``float``, then ``M=0``.
 
         """
-        cp_f = self._fluid_specific_heat(T_f)
+        T_f, cp_f = self._reference_fluid_conditions(T_f_in, T_b, m_flow, fluid_heat_capacity_mode, thermal_resistances_mode, tolT)
         a_in, a_b = self._heat_extraction_rate_to_self(m_flow, cp_f, T_f=T_f)
         q = a_in * T_f_in + a_b @ T_b
         return q
@@ -338,7 +409,16 @@ class _Tube(Borehole, ABC):
         """
         return self._m_flow_factor * m_flow
 
-    def outlet_fluid_temperature(self, T_f_in: float, T_b: Array, m_flow: float, T_f: float | Array | None = None) -> float:
+    def outlet_fluid_temperature(
+        self,
+        xi: Array | float,
+        T_f_in: float,
+        T_b: Array,
+        m_flow: float,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal',
+        tolT: float = 1e-3
+        ) -> float:
         """Outlet fluid temperature.
 
         Parameters
@@ -350,10 +430,32 @@ class _Tube(Borehole, ABC):
             Celsius).
         m_flow : float
             Fluid mass flow rate (in kg/s).
-        T_f : float, array or None, default: None
-            Fluid temperature or (`n_pipes`,) array of fluid
-            temperatures in each pipe (in degree Celcius). If
-            ``None``, the nominal fluid temperature is used.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the borefield.
+    
+            The modes 'average' triggers iterations during the simulation.
+        thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
+            Determines the value of the thermal resistances to use in the
+            borehole model:
+    
+                - 'nominal': The thermal resistances are evaluated at the nominal
+                fluid temperature.
+                - 'average': The thermal resistances are evaluated at the mean
+                fluid temperature in the borehole.
+                - 'per-pipe': The thermal resistances are evaluated at the fluid
+                temperature in each pipe, evaluated at mid-depth.
+    
+            The modes 'average' and 'per-pipe' trigger iterations during the
+            simulation.
+        tolT : float, default: 1e-3
+            Absolute tolerance on fluid temperatures during iterative
+            simulation steps.
 
         Returns
         -------
@@ -361,7 +463,7 @@ class _Tube(Borehole, ABC):
             Outlet fluid temperature (in degree Celsius).
 
         """
-        cp_f = self._fluid_specific_heat(T_f)
+        T_f, cp_f = self._reference_fluid_conditions(T_f_in, T_b, m_flow, fluid_heat_capacity_mode, thermal_resistances_mode, tolT)
         a_in, a_b = self._outlet_fluid_temperature(m_flow, cp_f, T_f=T_f)
         T_f_out = a_in * T_f_in + a_b @ T_b
         return T_f_out
@@ -390,28 +492,35 @@ class _Tube(Borehole, ABC):
         R_d = self.thermal_resistances(m_flow, T_f=T_f)
         return 1. / (self.m_flow_pipe(m_flow) * cp_f * R_d)
 
-    def _fluid_specific_heat(self, T_f: float | Array | None) -> float:
-        """Fluid specific isobaric heat capacity.
+    def _effective_borehole_thermal_resistance(self, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> float:
+        """Effective borehole thermal resistance.
 
         Parameters
         ----------
+        m_flow : float
+            Fluid mass flow rate (in kg/s).
+        cp_f : float
+            Fluid specific isobaric heat capacity (in J/kg-K).
         T_f : float, array or None, default: None
-            Fluid temperature or array of fluid temperatures
-            (in degree Celsius). If ``None`` or if `fluid_heat_capacity_mode`
-            is set to 'nominal', the nominal fluid temperature is used.
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
         float
-            The specific heat capacity at the mean temperature (in J/kg-K).
+            Effective borehole thermal resistance (in m-K/W).
 
         """
-        if T_f is None or self.fluid_heat_capacity_mode == 'nominal':
-            cp_f = self.fluid.specific_heat()
-        else:
-            T_f = jnp.mean(T_f)
-            cp_f = self.fluid.specific_heat(T_f=T_f)
-        return cp_f
+        m_flow_pipe = self.m_flow_pipe(m_flow)
+        beta_ij = self._beta_ij(m_flow, cp_f, T_f=T_f)
+        a = self._outlet_fluid_temperature_a_in(
+            beta_ij,
+            self._top_connectivity,
+            self._mixing,
+            self._s_coefs)
+        R_b = 0.5 * self.L / (m_flow * cp_f) * (1. + a) / (1. - a)
+        return R_b
 
     def _fluid_temperature(self, xi: Array | float, m_flow: float, cp_f: float, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Coefficients to evaluate the fluid temperatures.
@@ -676,6 +785,157 @@ class _Tube(Borehole, ABC):
             self.order
         )
         return a_in, a_b
+
+    @partial(jit, static_argnames=['self', 'fluid_heat_capacity_mode', 'thermal_resistances_mode'])
+    def _reference_fluid_conditions(
+        self,
+        T_f_in: float,
+        T_b: Array,
+        m_flow: float,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal',
+        tolT: float = 1e-3
+        ) -> Tuple[float | Array, float]:
+        """Reference conditions for fluid properties.
+
+        Parameters
+        ----------
+        T_f_in : float
+            Inlet fluid temperature (in degree Celsius).
+        T_b : array
+            (`n_nodes`,) array of borehole wall temperatures (in degree
+            Celsius).
+        m_flow : float
+            Fluid mass flow rate (in kg/s).
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the pipes. This only applies if the
+                fluid temperature is provided as an input to the class methods.
+    
+            The modes 'average' triggers iterations during the simulation.
+        thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
+            Determines the value of the thermal resistances to use in the
+            borehole model:
+    
+                - 'nominal': The thermal resistances are evaluated at the nominal
+                fluid temperature.
+                - 'average': The thermal resistances are evaluated at the mean
+                fluid temperature in the borehole.
+                - 'per-pipe': The thermal resistances are evaluated at the fluid
+                temperature in each pipe, evaluated at mid-depth.
+    
+            The modes 'average' and 'per-pipe' trigger iterations during the
+            simulation.
+        tolT : float, default: 1e-3
+            Absolute tolerance on fluid temperatures during iterative
+            simulation steps.
+
+        Returns
+        -------
+        T_f : float or array
+            The reference fluid temperature (in degree Celsius), or
+            (n_pipes,) array or reference fluid temperatures to evaluate
+            the convection thermal resistances in pipes.
+        cp_f : float
+            The specific heat capacity (in J/kg-K).
+
+        """
+        # The initial guess on the reference fluid temperature is equal
+        # to the inlet fluid temperature, unless the mode is 'nominal'
+        if thermal_resistances_mode == 'nominal':
+            T_f_init = T_f = self.fluid.T_nominal
+        elif thermal_resistances_mode in ['average', 'per-borehole']:
+            T_f_init = T_f_in
+        else:
+            T_f_init = jnp.broadcast_to(T_f_in, self.n_pipes)
+
+        # The initial guess on the fluid temperature for the specific
+        # heat is the inlet fluid temperature, unless the mode is 'nominal'
+        if fluid_heat_capacity_mode == 'nominal':
+            cp_f = self.fluid.specific_heat(T=self.fluid.T_nominal)
+            T_cp_f_init = self.fluid.T_nominal
+        else:
+            T_cp_f_init = T_f_in
+
+        # Early return if both modes are 'nominal'
+        if (
+            thermal_resistances_mode == 'nominal'
+            and fluid_heat_capacity_mode == 'nominal'
+        ):
+            return T_f, cp_f
+
+        def fluid_specific_heat(_T_cp_f: float) -> float:
+            """Fluid specific heat capacity."""
+            if fluid_heat_capacity_mode == 'nominal':
+                _cp_f = cp_f
+            else:
+                _cp_f = self.fluid.specific_heat(T=_T_cp_f)
+            return _cp_f
+
+        def fluid_specific_heat_temperature(_cp_f: float, _T_f: float | Array) -> float:
+            """Fluid temperature for the fluid specific heat."""
+            if fluid_heat_capacity_mode == 'nominal':
+                # Return the nominal fluid temperature
+                _T_cp_f = self.fluid.T_nominal
+            elif thermal_resistances_mode in ['average', 'per-borehole']:
+                # The temperature is the same as for the thermal resistances
+                _T_cp_f = _T_f
+            else:
+                # Evaluate the mean fluid temperature in the borehole
+                a_in, a_b = self._outlet_fluid_temperature(m_flow, _cp_f, T_f=_T_f)
+                _T_f_out = a_in * T_f_in + a_b @ T_b
+                _T_cp_f = 0.5 * (T_f_in + _T_f_out)
+            return _T_cp_f
+
+        def thermal_resistance_temperature(_cp_f: float, _T_f: float | Array) -> float | Array:
+            """Reference fluid temperature."""
+            if thermal_resistances_mode == 'nominal':
+                # Return the nominal fluid temperature
+                _T_f = self.fluid.T_nominal
+            elif thermal_resistances_mode in ['average', 'per-borehole']:
+                # Evaluate the mean fluid temperature in the borehole
+                a_in, a_b = self._outlet_fluid_temperature(m_flow, _cp_f, T_f=_T_f)
+                _T_f_out = a_in * T_f_in + a_b @ T_b
+                _T_f = 0.5 * (T_f_in + _T_f_out)
+            else:
+                # Evaluate the fluid temperature at mid-depth in each pipe
+                a_in, a_b = self._fluid_temperature(0.5, m_flow, _cp_f, T_f=_T_f)
+                _T_f = a_in * T_f_in + a_b @ T_b
+            return _T_f
+
+        def cond_fun(val: Tuple[float | Array, float, float]) -> bool:
+            """True if the temperature change is above tolerance."""
+            _T_f, _T_cp_f, _delta = val
+            return _delta > tolT
+
+        def body_fun(val: Tuple[float | Array, float, float]) -> Tuple[float | Array, float, float]:
+            """Update the temperatures for specific heat and resistances."""
+            # Unpack values
+            _T_f, _T_cp_f, _delta = val
+
+            # Update temperatures
+            _cp_f = fluid_specific_heat(_T_cp_f)
+            _T_f_new = thermal_resistance_temperature(_cp_f, _T_f)
+            _T_cp_f_new = fluid_specific_heat_temperature(_cp_f, _T_f_new)
+
+            # Evaluate the absolute change
+            _delta = jnp.maximum(
+                jnp.abs(_T_cp_f_new - _T_cp_f),
+                jnp.max(jnp.abs(_T_f_new - _T_f))
+            )
+            return _T_f_new, _T_cp_f_new, _delta
+
+        # Iterate until convergence
+        init_val = T_f_init, T_cp_f_init, jnp.inf
+        T_f, T_cp_f, delta = while_loop(cond_fun, body_fun, init_val)
+        cp_f = fluid_specific_heat(T_cp_f)
+
+        return T_f, cp_f
 
     @classmethod
     @abstractmethod
@@ -960,7 +1220,24 @@ class _Tube(Borehole, ABC):
         ...
 
     @classmethod
-    def from_dimensions(cls, R_d: ArrayLike | Callable[[float], Array], fluid: Fluid, L: float, D: float, r_b: float, x: float, y: float, basis: Basis, n_segments: int, tilt: float = 0., orientation: float = 0., segment_ratios: ArrayLike | None = None, order: int = 101, order_to_self: int = 21, parallel: bool = True, fluid_heat_capacity_mode: str = 'nominal') -> Self:
+    def from_dimensions(
+        cls,
+        R_d: ArrayLike | Callable[[float], Array],
+        fluid: Fluid,
+        L: float,
+        D: float,
+        r_b: float,
+        x: float,
+        y: float,
+        basis: Basis,
+        n_segments: int,
+        tilt: float = 0.,
+        orientation: float = 0.,
+        segment_ratios: ArrayLike | None = None,
+        order: int = 101,
+        order_to_self: int = 21,
+        parallel: bool = True
+    ) -> Self:
         """Straight borehole from its dimensions.
 
         Parameters
@@ -1007,16 +1284,6 @@ class _Tube(Borehole, ABC):
             by nodes and edges of the segments.
         parallel : bool, default: True
             True if pipes are in parallel. False if pipes are in series.
-        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
-            Determines the value of the fluid specific heat capacity to use
-            in the energy balances:
-    
-                - 'nominal': The fluid specific heat capacity is evaluated at
-                the nominal fluid temperature.
-                - 'average': The fluid specific heat capacity is evaluated at
-                the mean fluid temperature in the pipes. This only applies if
-                the fluid temperature is provided as an input to the class
-                methods.
 
         Returns
         -------
@@ -1025,4 +1292,4 @@ class _Tube(Borehole, ABC):
 
         """
         path = Path.Line(L, D, x, y, tilt, orientation)
-        return cls(R_d, fluid, r_b, path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, parallel=parallel, fluid_heat_capacity_mode=fluid_heat_capacity_mode)
+        return cls(R_d, fluid, r_b, path, basis, n_segments, segment_ratios=segment_ratios, order=order, order_to_self=order_to_self, parallel=parallel)

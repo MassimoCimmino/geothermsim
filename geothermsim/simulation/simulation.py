@@ -147,7 +147,8 @@ class Simulation:
         N = self.n_nodes
         # Borehole heat transfer rate coefficients for current fluid mass
         # flow rate `m_flow`
-        self.g_in, self.g_b = self.borefield.g_to_self(m_flow)
+        cp_f = self.borefield.fluid.specific_heat()
+        self.g_in, self.g_b = self.borefield._heat_extraction_rate_to_self(m_flow, cp_f)
         # Update system of equation for the current borehole wall
         # temperature `T0` at nodes
         A = self.A.at[:N, :N].set(-(jnp.eye(N) + jnp.einsum('iml,iljn->imjn', self.g_b, self.h_to_self).reshape((N, N))))
