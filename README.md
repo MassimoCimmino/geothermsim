@@ -52,7 +52,7 @@ working properly by running the [notebooks](notebooks/README.md).
 
 ### Requirements
 
-geothermsim was developed and tested using Python 3.12. In addition, the
+geothermsim was developed using Python 3.12, but should be compatible with Python 3.10 and 3.11. In addition, the
 following packages are needed to run geothermsim and its examples:
 - jax (>= 0.6.0)
 - matplotlib (>= 3.10.0),
