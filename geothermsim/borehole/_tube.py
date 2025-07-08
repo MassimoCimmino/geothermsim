@@ -335,7 +335,6 @@ class _Tube(Borehole, ABC):
 
     def heat_extraction_rate_to_self(
         self,
-        xi: Array | float,
         T_f_in: float,
         T_b: Array,
         m_flow: float,
@@ -411,7 +410,6 @@ class _Tube(Borehole, ABC):
 
     def outlet_fluid_temperature(
         self,
-        xi: Array | float,
         T_f_in: float,
         T_b: Array,
         m_flow: float,
