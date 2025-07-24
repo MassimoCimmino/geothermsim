@@ -110,7 +110,8 @@ class gFunction:
             ),
             axis=0)
         # Borehole heat transfer rate coefficients
-        self.g_in, self.g_b = self.borefield.g_to_self(self.m_flow)
+        cp_f = self.borefield.fluid.specific_heat()
+        self.g_in, self.g_b = self.borefield._heat_extraction_rate_to_self(self.m_flow, cp_f)
         # Initialize system of equations
         self.A = jnp.block(
             [[jnp.eye(N), self.g_in.reshape((-1, 1))],
@@ -227,7 +228,7 @@ class gFunction:
         # Average fluid temperature
         T_f = 0.5 * (self.T_f_in + T_f_out)
         # Borefield thermal resistance
-        R_field = self.borefield.effective_borefield_thermal_resistance(self.m_flow)
+        R_field = self.borefield._effective_borefield_thermal_resistance(self.m_flow, cp_f)
         # Effective borehole wall temperature
         self.g = T_f - 2 * jnp.pi * self.k_s * R_field
         if disp:

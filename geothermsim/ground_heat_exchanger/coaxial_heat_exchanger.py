@@ -126,13 +126,17 @@ class CoaxialHeatExchanger(_GroundHeatExchanger):
             J=self.J)
 
     @partial(jit, static_argnames=['self'])
-    def thermal_resistances(self, m_flow: float) -> Array:
+    def thermal_resistances(self, m_flow: float, T_f: float | Array | None = None) -> Array:
         """Evaluate delta-circuit thermal resistances.
 
         Parameters
         ----------
         m_flow : float
             Fluid mass flow rate (in kg/s).
+        T_f : float, array or None, default: None
+            Fluid temperature or (`n_pipes`,) array of fluid
+            temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -143,23 +147,52 @@ class CoaxialHeatExchanger(_GroundHeatExchanger):
         """
         m_flow_pipe = self._m_flow_factor * m_flow
         # Fluid physical properties
-        rho_f = self.fluid.density()
-        mu_f = self.fluid.viscosity()
-        k_f = self.fluid.conductivity()
-        Pr = self.fluid.prandtl()
+        rho_f = jnp.broadcast_to(
+            self.fluid.density(T_f),
+            self.n_pipes
+        )
+        mu_f = jnp.broadcast_to(
+            self.fluid.viscosity(T_f),
+            self.n_pipes
+        )
+        k_f = jnp.broadcast_to(
+            self.fluid.conductivity(T_f),
+            self.n_pipes
+        )
+        Pr = jnp.broadcast_to(
+            self.fluid.prandtl(T_f),
+            self.n_pipes
+        )
         # Convection thermal resistance in circular pipes
         h_fluid_inner = vmap(
             convective_heat_transfer_coefficient_circular_pipe,
-            in_axes=(None, 0, None, None, None, None, None),
+            in_axes=(None, 0, 0, 0, 0, 0, None),
             out_axes=0
-        )(m_flow_pipe, self._r_p_in_inner, mu_f, rho_f, k_f, Pr, self.epsilon)
+        )(
+            m_flow_pipe,
+            self._r_p_in_inner,
+            mu_f[self.indices_inner],
+            rho_f[self.indices_inner],
+            k_f[self.indices_inner],
+            Pr[self.indices_inner],
+            self.epsilon
+        )
         R_f_inner = 1 / (2 * jnp.pi * self._r_p_in_inner * h_fluid_inner)
         # Convection thermal resistances in annular pipes
         h_fluid_outer = vmap(
             convective_heat_transfer_coefficient_annular_pipe,
-            in_axes=(None, 0, 0, None, None, None, None, None),
+            in_axes=(None, 0, 0, 0, 0, 0, 0, None),
             out_axes=0
-        )(m_flow_pipe, self._r_p_out_inner, self._r_p_in_outer, mu_f, rho_f, k_f, Pr, self.epsilon)
+        )(
+            m_flow_pipe,
+            self._r_p_out_inner,
+            self._r_p_in_outer,
+            mu_f[self.indices_outer],
+            rho_f[self.indices_outer],
+            k_f[self.indices_outer],
+            Pr[self.indices_outer], 
+            self.epsilon
+        )
         R_f_in_outer = 1 / (2 * jnp.pi * self._r_p_out_inner * h_fluid_outer[:, 0])
         R_f_out_outer = 1 / (2 * jnp.pi * self._r_p_in_outer * h_fluid_outer[:, 1])
         # Short-circuit thermal resistances

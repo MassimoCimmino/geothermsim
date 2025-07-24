@@ -6,6 +6,7 @@
 ### New features
 
 * [Issue 19](https://github.com/MassimoCimmino/geothermsim/issues/19) - Created the `Fluid` class. The class includes a method to evaluate fluid properties from the `SecondaryCoolantProps` package.
+* [Issue 20](https://github.com/MassimoCimmino/geothermsim/issues/20) - Methods of `GroundHeatExchanger`, `Borehole` and `Borefield` now take the fluid temperature as an optional argument to evaluate temperature-dependent thermal resistances.
 
 
 ## Version 0.2.0 (2025-06-29)
