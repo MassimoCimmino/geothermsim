@@ -180,9 +180,9 @@ class _Tube(Borehole, ABC):
                 - 'nominal': The fluid specific heat capacity is evaluated at the
                 nominal fluid temperature.
                 - 'average': The fluid specific heat capacity is evaluated at the
-                mean fluid temperature in the borefield.
+                mean fluid temperature in the borehole.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole model:
@@ -240,9 +240,9 @@ class _Tube(Borehole, ABC):
                 - 'nominal': The fluid specific heat capacity is evaluated at the
                 nominal fluid temperature.
                 - 'average': The fluid specific heat capacity is evaluated at the
-                mean fluid temperature in the borefield.
+                mean fluid temperature in the borehole.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole model:
@@ -301,9 +301,9 @@ class _Tube(Borehole, ABC):
                 - 'nominal': The fluid specific heat capacity is evaluated at the
                 nominal fluid temperature.
                 - 'average': The fluid specific heat capacity is evaluated at the
-                mean fluid temperature in the borefield.
+                mean fluid temperature in the borehole.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole model:
@@ -360,9 +360,9 @@ class _Tube(Borehole, ABC):
                 - 'nominal': The fluid specific heat capacity is evaluated at the
                 nominal fluid temperature.
                 - 'average': The fluid specific heat capacity is evaluated at the
-                mean fluid temperature in the borefield.
+                mean fluid temperature in the borehole.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole model:
@@ -435,9 +435,9 @@ class _Tube(Borehole, ABC):
                 - 'nominal': The fluid specific heat capacity is evaluated at the
                 nominal fluid temperature.
                 - 'average': The fluid specific heat capacity is evaluated at the
-                mean fluid temperature in the borefield.
+                mean fluid temperature in the borehole.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole model:
@@ -815,7 +815,7 @@ class _Tube(Borehole, ABC):
                 mean fluid temperature in the pipes. This only applies if the
                 fluid temperature is provided as an input to the class methods.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole model:

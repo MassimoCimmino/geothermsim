@@ -87,7 +87,7 @@ class Network(Borefield):
                 - 'average': The fluid specific heat capacity is evaluated at the
                 mean fluid temperature in the borefield.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole models:
@@ -151,7 +151,7 @@ class Network(Borefield):
                 - 'average': The fluid specific heat capacity is evaluated at the
                 mean fluid temperature in the borefield.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole models:
@@ -217,7 +217,7 @@ class Network(Borefield):
                 - 'average': The fluid specific heat capacity is evaluated at the
                 mean fluid temperature in the borefield.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole models:
@@ -280,7 +280,7 @@ class Network(Borefield):
                 - 'average': The fluid specific heat capacity is evaluated at the
                 mean fluid temperature in the borefield.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole models:
@@ -366,7 +366,7 @@ class Network(Borefield):
                 - 'average': The fluid specific heat capacity is evaluated at the
                 mean fluid temperature in the borefield.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole models:
@@ -632,7 +632,7 @@ class Network(Borefield):
                 - 'average': The fluid specific heat capacity is evaluated at the
                 mean fluid temperature in the borefield.
     
-            The modes 'average' triggers iterations during the simulation.
+            The mode 'average' triggers iterations during the simulation.
         thermal_resistances_mode : {'nominal', 'average', 'per-pipe'}, default: 'nominal'
             Determines the value of the thermal resistances to use in the
             borehole models:
