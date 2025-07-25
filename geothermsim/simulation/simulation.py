@@ -643,9 +643,9 @@ class Simulation:
         T_b : array
             The borehole wall temperature at the nodes (in degree
             Celsius).
-        T_f_in : nan
+        T_f_in : float
             The inlet fluid temperature (in degree Celsius).
-        T_f_out : nan
+        T_f_out : float
             The outlet fluid temperature (in degree Celsius).
         n_iterations : int
             Number of iterations.
@@ -655,7 +655,10 @@ class Simulation:
         Q = 0.
         q = jnp.zeros((self.borefield.n_boreholes, self.borefield.n_nodes))
         T_b = jnp.full((self.borefield.n_boreholes, self.borefield.n_nodes), T0)
-        T_f_in = jnp.nan
-        T_f_out = jnp.nan
+        T0_mean = jnp.tensordot(
+            self.borefield.w, T0, axes=([-2, -1], [-2, -1])
+        ) / self.borefield.L.sum()
+        T_f_in = T0_mean
+        T_f_out = T0_mean
         n_iterations = 0
         return Q, q, T_b, T_f_in, T_f_out, n_iterations
