@@ -154,7 +154,7 @@ class Multipole:
             )(beta, k)
         coeffs = (1 + beta_k) / (1 - beta_k)
         diag_indices = jnp.diag_indices_from(self.A)
-        A = self.A.at[*diag_indices].add(jnp.concatenate([coeffs.flatten(), -coeffs.flatten()]))
+        A = self.A.at[diag_indices].add(jnp.concatenate([coeffs.flatten(), -coeffs.flatten()]))
         # Right hand side (eq. 36)
         B = (-self.factors_line @ q).flatten()
         B = jnp.concatenate([B.real, B.imag])
@@ -191,7 +191,7 @@ class Multipole:
         K = -jnp.linalg.inv(R)
         # Delta-circuit thermal resistances (eq. 51)
         diag_indices = jnp.diag_indices_from(K)
-        K = K.at[*diag_indices].set(-K.sum(axis=1))
+        K = K.at[diag_indices].set(-K.sum(axis=1))
         R_d = 1 / K
         return R_d
 
@@ -361,7 +361,7 @@ class Multipole:
         diag_indices = jnp.diag_indices_from(
             self.thermal_resistances_line_zero_beta
             )
-        R = self.thermal_resistances_line_zero_beta.at[*diag_indices].add(
+        R = self.thermal_resistances_line_zero_beta.at[diag_indices].add(
             beta / (2 * jnp.pi * self.k_b)
             )
         return R

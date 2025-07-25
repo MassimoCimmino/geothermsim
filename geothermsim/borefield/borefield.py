@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-from typing import List, Self
+from typing import List
+from typing_extensions import Self
 
 from jax import numpy as jnp
 from jax import Array, jit, vmap

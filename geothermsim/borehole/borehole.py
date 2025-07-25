@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from functools import partial
-from typing import Self, Tuple
+from typing import Tuple
+from typing_extensions import Self
 
 from jax import numpy as jnp
 from jax import Array, jit, vmap

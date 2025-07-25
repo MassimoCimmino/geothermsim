@@ -9,6 +9,10 @@
 * [Issue 20](https://github.com/MassimoCimmino/geothermsim/issues/20) - Methods of `GroundHeatExchanger`, `Borehole` and `Borefield` now take the fluid temperature as an optional argument to evaluate temperature-dependent thermal resistances.
 * [Issue 21](https://github.com/MassimoCimmino/geothermsim/issues/21) - Simulations can now consider temperature-dependent fluid physical properties and borehole thermal resistances.
 
+### Other changes
+
+* [Pull request 22](https://github.com/MassimoCimmino/geothermsim/pull/22) - `geothermsim` is now compatible with Python 3.10.
+
 
 ## Version 0.2.0 (2025-06-29)
 
