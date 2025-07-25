@@ -7,7 +7,7 @@ from typing import Tuple
 
 from jax import numpy as jnp
 from jax import Array, debug, jit, vmap
-from jax.lax import cond, fori_loop
+from jax.lax import cond, fori_loop, while_loop
 from jax.typing import ArrayLike
 import numpy as np
 
@@ -44,6 +44,34 @@ class Simulation:
     store_node_values : bool, default: ``False``
         Set to True to store the borehole wall temperature and heat
         extraction rates at the nodes.
+    fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+        Determines the value of the fluid specific heat capacity to use in
+        the energy balances:
+
+            - 'nominal': The fluid specific heat capacity is evaluated at the
+            nominal fluid temperature.
+            - 'average': The fluid specific heat capacity is evaluated at the
+            mean fluid temperature in the borefield.
+
+        The mode 'average' triggers iterations during the simulation.
+    thermal_resistances_mode : {'nominal', 'average', 'per-borehole', 'per-pipe'}, default: 'nominal'
+        Determines the value of the thermal resistances to use in the
+        borehole models:
+
+            - 'nominal': The thermal resistances are evaluated at the nominal
+            fluid temperature.
+            - 'average': The thermal resistances are evaluated at the mean
+            fluid temperature in the borefield.
+            - 'per-borehole': The thermal resistances are evaluated at the mean
+            fluid temperature in each borehole.
+            - 'per-pipe': The thermal resistances are evaluated at the fluid
+            temperature in each pipe, evaluated at mid-depth.
+
+        The modes 'average', 'per-borehole' and 'per-pipe' trigger iterations
+        during the simulation.
+    tolT : float, default: 1e-3
+        Absolute tolerance on fluid temperatures during iterative
+        simulation steps.
 
     Attributes
     ----------
@@ -65,10 +93,26 @@ class Simulation:
         The ground temperature (in degree Celsius) at positions `p`.
     m_flow : float
         Total fluid mass flow rate (in kg/s).
+    n_iterations : array
+        Number of iterations per time step.
 
     """
 
-    def __init__(self, borefield: Network, dt: float, tmax: float, T0: float | Callable[[float, Array], Array | float], alpha: float, k_s: float, cells_per_level: int = 5, p: ArrayLike | None = None, store_node_values: bool = False):
+    def __init__(
+        self,
+        borefield: Network,
+        dt: float,
+        tmax: float,
+        T0: float | Callable[[float, Array], Array | float],
+        alpha: float,
+        k_s: float,
+        cells_per_level: int = 5,
+        p: ArrayLike | None = None,
+        store_node_values: bool = False,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal',
+        tolT: float = 1e-3
+        ):
         # Runtime type validation
         if not isinstance(p, ArrayLike) and p is not None:
             raise TypeError(f"Expected arraylike or None input; got {p}")
@@ -88,6 +132,9 @@ class Simulation:
         self.cells_per_level = cells_per_level
         self.p = p
         self.store_node_values = store_node_values
+        self.fluid_heat_capacity_mode = fluid_heat_capacity_mode
+        self.thermal_resistances_mode = thermal_resistances_mode
+        self.tolT = tolT
         # Additional attributes
         self.n_times = int(tmax // dt)
         if p is None:
@@ -122,7 +169,7 @@ class Simulation:
             )
         self.B = jnp.zeros(N + 1)
 
-    def update_system_of_equations(self, m_flow: float | Array, Q: float, T0: Array) -> Tuple[Array, Array]:
+    def update_system_of_equations(self, m_flow: float | Array, cp_f: float, Q: float, T0: Array, T_f: float | Array | None = None) -> Tuple[Array, Array]:
         """Update the system of equations.
 
         Parameters
@@ -130,11 +177,18 @@ class Simulation:
         m_flow : float or array
             Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
             array of fluid mass flow rate per borehole.
+        cp_f : float
+            Fluid specific isobaric heat capacity (in J/kg-K).
         Q : float
             Total heat extraction rate (in watts).
         T0 : array
             Borehole wall temperature at nodes (in degree Celsius)
             assuming zero heat extraction rate.
+        T_f : float, array or None, default: None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
 
         Returns
         -------
@@ -147,8 +201,7 @@ class Simulation:
         N = self.n_nodes
         # Borehole heat transfer rate coefficients for current fluid mass
         # flow rate `m_flow`
-        cp_f = self.borefield.fluid.specific_heat()
-        self.g_in, self.g_b = self.borefield._heat_extraction_rate_to_self(m_flow, cp_f)
+        self.g_in, self.g_b = self.borefield._heat_extraction_rate_to_self(m_flow, cp_f, T_f=T_f)
         # Update system of equation for the current borehole wall
         # temperature `T0` at nodes
         A = self.A.at[:N, :N].set(-(jnp.eye(N) + jnp.einsum('iml,iljn->imjn', self.g_b, self.h_to_self).reshape((N, N))))
@@ -158,7 +211,14 @@ class Simulation:
         B = B.at[-1].set(Q)
         return A, B
 
-    def simulate(self, Q: ArrayLike, f_m_flow: Callable[[float], float | Array], m_flow_small: float = 0.01, disp: bool = True, print_every: int = 100):
+    def simulate(
+        self,
+        Q: ArrayLike,
+        f_m_flow: Callable[[float], float | Array],
+        m_flow_small: float = 0.01,
+        disp: bool = True,
+        print_every: int = 100
+        ):
         """Simulate the borefield.
 
         Parameters
@@ -196,6 +256,7 @@ class Simulation:
         self.T_f_out = jnp.zeros(self.n_times)
         self.Q = jnp.tile(Q, n_cycles)[:self.n_times]
         self.m_flow = jnp.zeros(self.n_times)
+        self.n_iterations = jnp.zeros(self.n_times, dtype=int)
         if self.store_node_values:
             self.q = jnp.zeros((self.n_times, self.borefield.n_boreholes, self.borefield.n_nodes))
             self.T_b = jnp.zeros((self.n_times, self.borefield.n_boreholes, self.borefield.n_nodes))
@@ -209,14 +270,14 @@ class Simulation:
 
         def simulate_step(
             i: int,
-            val: Tuple[Array, Array, Array, Array, Array, Array | None, Array | None, Array]
-        ) -> Tuple[Array, Array, Array, Array, Array, Array | None, Array | None, Array]:
+            val: Tuple[Array, Array, Array, Array, Array, Array | None, Array | None, Array, Array]
+        ) -> Tuple[Array, Array, Array, Array, Array, Array | None, Array | None, Array, Array]:
             """Single simulation step."""
             # Unpack values
-            m_flow, Q, T_b, T_f_in, T_f_out, q, T, q_history = val
+            m_flow, Q, T_b, T_f_in, T_f_out, q, T, q_history, n_iterations = val
             # Time step
             q_history = self.loadAgg._next_time_step(
-                self.loadAgg.A, q_history)
+                self.loadAgg.A, self.loadAgg.B, q_history)
             time = (i + 1) * self.dt
             current_Q = self.Q[i]
             # Fluid mass flow rate
@@ -234,7 +295,7 @@ class Simulation:
                 ) / (2 * jnp.pi * self.k_s)
             )
             # Build and solve system of equations
-            _Q, _q, _T_b, _T_f_in, _T_f_out = self._simulate_step(
+            _Q, _q, _T_b, _T_f_in, _T_f_out, _n_iterations = self._simulate_step(
                 _m_flow,
                 current_Q,
                 T0,
@@ -246,6 +307,7 @@ class Simulation:
             Q = Q.at[i].set(_Q)
             T_f_in = T_f_in.at[i].set(_T_f_in)
             T_f_out = T_f_out.at[i].set(_T_f_out)
+            n_iterations = n_iterations.at[i].set(_n_iterations)
             if self.store_node_values:
                 q = q.at[i].set(_q)
                 T_b = T_b.at[i].set(_T_b)
@@ -271,12 +333,12 @@ class Simulation:
                     lambda _: None,
                     None
                 )
-            return m_flow, Q, T_b, T_f_in, T_f_out, q, T, q_history
+            return m_flow, Q, T_b, T_f_in, T_f_out, q, T, q_history, n_iterations
 
         # Pack variables
-        val = self.m_flow, self.Q, self.T_b, self.T_f_in, self.T_f_out, self.q, self.T, self.loadAgg.q
+        val = self.m_flow, self.Q, self.T_b, self.T_f_in, self.T_f_out, self.q, self.T, self.loadAgg.q, self.n_iterations
         # Run simulation
-        self.m_flow, self.Q, self.T_b, self.T_f_in, self.T_f_out, self.q, self.T, _ = fori_loop(
+        self.m_flow, self.Q, self.T_b, self.T_f_in, self.T_f_out, self.q, self.T, _, self.n_iterations = fori_loop(
             0, self.n_times, simulate_step, val, unroll=False)
 
         if disp:
@@ -286,8 +348,116 @@ class Simulation:
                 clock=toc-tic
             )
 
+    def _reference_fluid_conditions(
+        self,
+        m_flow: float | Array,
+        cp_f: float,
+        T_f_in: float,
+        T_f_out: float,
+        T_b: Array,
+        T_f: float | Array | None,
+        fluid_heat_capacity_mode: str = 'nominal',
+        thermal_resistances_mode: str = 'nominal'
+        ) -> float:
+        """Reference conditions for fluid properties.
+
+        Parameters
+        ----------
+        m_flow : float or array
+            Total fluid mass flow rate (in kg/s), or (`n_boreholes`,)
+            array of fluid mass flow rate per borehole.
+        T_f_in : float
+            Inlet fluid temperature (in degree Celsius).
+        T_f_out : float
+            Outlet fluid temperature (in degree Celsius).
+        T_b : array
+            (`n_boreholes, `n_nodes`,) array of borehole wall temperatures
+            (in degree Celsius).
+        T_f : float, array or None
+            Mean fluid temperature, (`n_boreholes`,) array of per-borehole
+            mean fluid temperature, or (`n_boreholes`, `n_pipes`,) array of
+            fluid temperatures in each pipe (in degree Celcius). If
+            ``None``, the nominal fluid temperature is used.
+        fluid_heat_capacity_mode : {'nominal', 'average'}, default: 'nominal'
+            Determines the value of the fluid specific heat capacity to use in
+            the energy balances:
+    
+                - 'nominal': The fluid specific heat capacity is evaluated at the
+                nominal fluid temperature.
+                - 'average': The fluid specific heat capacity is evaluated at the
+                mean fluid temperature in the borefield.
+    
+            The mode 'average' triggers iterations during the simulation.
+        thermal_resistances_mode : {'nominal', 'average', 'per-borehole', 'per-pipe'}, default: 'nominal'
+            Determines the value of the thermal resistances to use in the
+            borehole models:
+    
+                - 'nominal': The thermal resistances are evaluated at the nominal
+                fluid temperature.
+                - 'average': The thermal resistances are evaluated at the mean
+                fluid temperature in the borefield.
+                - 'per-borehole': The thermal resistances are evaluated at the mean
+                fluid temperature in each borehole.
+                - 'per-pipe': The thermal resistances are evaluated at the fluid
+                temperature in each pipe, evaluated at mid-depth.
+    
+            The modes 'average', 'per-borehole' and 'per-pipe' trigger iterations
+            during the simulation.
+
+        Returns
+        -------
+        T_f : float or array
+            The reference fluid temperature (in degree Celsius), or
+            (n_boreholes,) or (n_boreholes, n_pipes,) array or reference
+            fluid temperatures to evaluate the convection thermal resistances
+            in pipes.
+        T_cp_f : float
+            The reference fluid temperature to evaluate the fluid specific
+            heat capacity.
+        cp_f : float
+            The specific heat capacity (in J/kg-K).
+
+        """
+        # --- Fluid specific heat capacity ---
+        # Temperature
+        if fluid_heat_capacity_mode == 'average':
+            # Evaluate the mean fluid temperature in the borefield
+            T_cp_f = 0.5 * (T_f_in + T_f_out)
+        else:
+            # Return the nominal fluid temperature
+            T_cp_f = self.borefield.fluid.T_nominal
+        # Specific heat capacity
+        if fluid_heat_capacity_mode == 'average':
+            cp_f = self.borefield.fluid.specific_heat(T=T_cp_f)
+        else:
+            cp_f = self.borefield.fluid.specific_heat()
+
+        # --- Thermal resistances ---
+        if thermal_resistances_mode == 'per-pipe':
+            # Evaluate the fluid temperature at mid-depth in each pipe
+            a_in, a_b = self.borefield._fluid_temperature(0.5, m_flow, cp_f, T_f=T_f)
+            T_f = a_in * T_f_in + vmap(jnp.dot, in_axes=(0, 0), out_axes=0)(a_b, T_b)
+        elif thermal_resistances_mode == 'per-borehole':
+            # Evaluate the mean fluid temperature in each borehole
+            a_in, a_b = self.borefield._outlet_fluid_temperature(m_flow, cp_f, T_f=T_f)
+            T_f_out_borehole = a_in * T_f_in + vmap(jnp.dot, in_axes=(0, 0), out_axes=0)(a_b, T_b)
+            T_f = 0.5 * (T_f_in + T_f_out_borehole)
+        elif thermal_resistances_mode == 'average':
+            # Evaluate the mean fluid temperature in the borefield
+            T_f = 0.5 * (T_f_in + T_f_out)
+        else:
+            # Return the nominal fluid temperature
+            T_f = self.borefield.fluid.T_nominal
+        return T_f, T_cp_f, cp_f
+
     @partial(jit, static_argnames=['self'])
-    def _simulate_step(self, m_flow: float | Array, Q: float, T0: Array, m_flow_small: float) -> Tuple[float, Array, Array, float, float]:
+    def _simulate_step(
+        self,
+        m_flow: float | Array,
+        Q: float,
+        T0: Array,
+        m_flow_small: float
+        ) -> Tuple[float, Array, Array, float, float, int]:
         """Solve a single time step.
 
         Parameters
@@ -318,10 +488,12 @@ class Simulation:
             Celsius).
         T_f_in : float
             The inlet fluid temperature (in degree Celsius).
+        n_iterations : int
+            Number of iterations.
 
         """
         m_flow_network = jnp.sum(m_flow)
-        Q, q, T_b, T_f_in, T_f_out = cond(
+        Q, q, T_b, T_f_in, T_f_out, n_iterations = cond(
             m_flow_network > m_flow_small,
             self._simulate_step_flow,
             self._simulate_step_no_flow,
@@ -330,10 +502,16 @@ class Simulation:
             T0,
             m_flow_small
         )
-        return Q, q, T_b, T_f_in, T_f_out
+        return Q, q, T_b, T_f_in, T_f_out, n_iterations
 
     @partial(jit, static_argnames=['self'])
-    def _simulate_step_flow(self, m_flow: float | Array, Q: float, T0: Array, m_flow_small: float) -> Tuple[float, Array, Array, float, float]:
+    def _simulate_step_flow(
+        self,
+        m_flow: float | Array,
+        Q: float,
+        T0: Array,
+        m_flow_small: float
+        ) -> Tuple[float, Array, Array, float, float, int]:
         """Solve a single time step.
 
         Parameters
@@ -366,25 +544,77 @@ class Simulation:
             The inlet fluid temperature (in degree Celsius).
         T_f_out : float
             The outlet fluid temperature (in degree Celsius).
+        n_iterations : int
+            Number of iterations.
 
         """
-        cp_f = self.borefield.fluid.specific_heat()
         m_flow = jnp.maximum(m_flow, m_flow_small)
-        # Build and solve system of equations
-        A, B = self.update_system_of_equations(
-            m_flow,
-            Q,
-            T0)
-        X = jnp.linalg.solve(A, B)
-        # Store results
-        q = X[:self.n_nodes].reshape((self.borefield.n_boreholes, -1))
-        T_b = T0 - jnp.tensordot(self.h_to_self, q, axes=([-2, -1], [-2, -1]))
-        T_f_in = X[-1]
-        T_f_out = T_f_in + Q / (jnp.sum(m_flow) * cp_f)
-        return Q, q, T_b, T_f_in, T_f_out
+        m_flow_borehole = self.borefield.m_flow_borehole(m_flow)
+
+        def cond_fun(val: Tuple[Array, Array, float, float, float | Array, float, float, float, int]) -> bool:
+            """True if the temperature change is above tolerance."""
+            _q, _T_b, _T_f_in, _T_f_out, _T_f, _T_cp_f, _cp_f, _delta, _n_iterations = val
+            return _delta > self.tolT
+
+        def body_fun(
+            val: Tuple[Array, Array, float, float, float | Array, float, float, float, int]
+            ) -> Tuple[Array, Array, float, float, float | Array, float, float, float, int]:
+            """Update the temperatures for specific heat and resistances."""
+            # --- Unpack values ---
+            _q, _T_b, _T_f_in, _T_f_out, _T_f, _T_cp_f, _cp_f, _delta, _n_iterations = val
+
+            # --- Simulation step ---
+            # Build and solve system of equations
+            A, B = self.update_system_of_equations(
+                m_flow, _cp_f, Q, T0, T_f=_T_f)
+            X = jnp.linalg.solve(A, B)
+            # Store results
+            _q = X[:self.n_nodes].reshape((self.borefield.n_boreholes, -1))
+            _T_b = T0 - jnp.tensordot(self.h_to_self, _q, axes=([-2, -1], [-2, -1]))
+            _T_f_in = X[-1]
+            _T_f_out = _T_f_in + Q / (jnp.sum(m_flow) * _cp_f)
+
+            # --- Update temperatures ---
+            _T_f_new, _T_cp_f_new, _cp_f = self._reference_fluid_conditions(
+                m_flow, _cp_f, _T_f_in, _T_f_out, _T_b, _T_f,
+                fluid_heat_capacity_mode=self.fluid_heat_capacity_mode,
+                thermal_resistances_mode=self.thermal_resistances_mode)
+
+            # --- Absolute change ---
+            _delta = jnp.maximum(
+                jnp.abs(_T_cp_f_new - _T_cp_f),
+                jnp.max(jnp.abs(_T_f_new - _T_f))
+            )
+            return _q, _T_b, _T_f_in, _T_f_out, _T_f_new, _T_cp_f_new, _cp_f, _delta, _n_iterations + 1
+
+        # Initial guesses
+        q_init = jnp.zeros((self.borefield.n_boreholes, self.borefield.n_nodes))
+        T_b_init = jnp.zeros((self.borefield.n_boreholes, self.borefield.n_nodes))
+        T_f_in_init = self.borefield.fluid.T_nominal
+        T_f_out_init = self.borefield.fluid.T_nominal
+        T_f_init = self.borefield.fluid.T_nominal
+        if self.thermal_resistances_mode == 'per-borehole':
+            T_f_init = jnp.broadcast_to(T_f_init, self.borefield.n_boreholes)
+        elif self.thermal_resistances_mode == 'per-pipe':
+            n_pipes = self.borefield.boreholes[0].n_pipes
+            T_f_init = jnp.broadcast_to(T_f_init, (self.borefield.n_boreholes, n_pipes))
+        T_cp_f_init = self.borefield.fluid.T_nominal
+        cp_f_init = self.borefield.fluid.specific_heat()
+
+        # Iterate until convergence
+        init_val = q_init, T_b_init, T_f_in_init, T_f_out_init, T_f_init, T_cp_f_init, cp_f_init, jnp.inf, 0
+        q, T_b, T_f_in, T_f_out, T_f, T_cp_f, cp_f, delta, n_iterations = while_loop(cond_fun, body_fun, init_val)
+
+        return Q, q, T_b, T_f_in, T_f_out, n_iterations
 
     @partial(jit, static_argnames=['self'])
-    def _simulate_step_no_flow(self, m_flow: float | Array, Q: float, T0: Array, m_flow_small: float) -> Tuple[float, Array, Array, float, float]:
+    def _simulate_step_no_flow(
+        self,
+        m_flow: float | Array,
+        Q: float,
+        T0: Array,
+        m_flow_small: float
+        ) -> Tuple[float, Array, Array, float, float, int]:
         """Solve a single time step with zero mass flow rate.
 
         Parameters
@@ -413,16 +643,22 @@ class Simulation:
         T_b : array
             The borehole wall temperature at the nodes (in degree
             Celsius).
-        T_f_in : nan
+        T_f_in : float
             The inlet fluid temperature (in degree Celsius).
-        T_f_out : nan
+        T_f_out : float
             The outlet fluid temperature (in degree Celsius).
+        n_iterations : int
+            Number of iterations.
 
         """
         # Store results
         Q = 0.
         q = jnp.zeros((self.borefield.n_boreholes, self.borefield.n_nodes))
         T_b = jnp.full((self.borefield.n_boreholes, self.borefield.n_nodes), T0)
-        T_f_in = jnp.nan
-        T_f_out = jnp.nan
-        return Q, q, T_b, T_f_in, T_f_out
+        T0_mean = jnp.tensordot(
+            self.borefield.w, T0, axes=([-2, -1], [-2, -1])
+        ) / self.borefield.L.sum()
+        T_f_in = T0_mean
+        T_f_out = T0_mean
+        n_iterations = 0
+        return Q, q, T_b, T_f_in, T_f_out, n_iterations
